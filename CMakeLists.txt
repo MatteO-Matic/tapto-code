@@ -76,6 +76,7 @@ endfunction()
 add_executable(tapto-code
   src/main.cpp
   src/commands.cpp
+  src/memory.cpp
   src/prompt.cpp
   src/session.cpp
   src/tools.cpp
@@ -106,6 +107,7 @@ add_executable(test-edits
   tests/test_edits.cpp
   src/tools.cpp
   src/commands.cpp
+  src/memory.cpp
   "${libtapto_SOURCE_DIR}/test/ui_null.cpp"
 )
 target_include_directories(test-edits PRIVATE include)
@@ -150,3 +152,20 @@ target_link_libraries(test-session PRIVATE tapto::tapto)
 tapto_code_warnings(test-session)
 
 add_test(NAME session COMMAND test-session)
+
+# The project's memory file: where it lives (beside the local config, under the
+# same encoded working directory), who may reach it (the editor tool alone, by
+# a spelling that resolves to it -- no other tool, no command cwd or %p), and
+# what the system prompt carries of it (the first 50 lines, the index).
+add_executable(test-memory
+  tests/test_memory.cpp
+  src/tools.cpp
+  src/commands.cpp
+  src/memory.cpp
+  "${libtapto_SOURCE_DIR}/test/ui_null.cpp"
+)
+target_include_directories(test-memory PRIVATE include)
+target_link_libraries(test-memory PRIVATE tapto::tapto)
+tapto_code_warnings(test-memory)
+
+add_test(NAME memory COMMAND test-memory)

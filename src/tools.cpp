@@ -5,6 +5,7 @@
 #include "tapto/commands.h"
 
 #include "tapto/context.h"
+#include "tapto/memory.h"
 #include "tapto/policy.h"
 
 #include <algorithm>
@@ -206,7 +207,13 @@ const Folder* granted_owner(const fs::path& resolved, bool writable_only) {
 //               letting the model edit a folder and letting it run the
 //               project's own build there is the same trust.
 //   WorkingDir  the working directory alone.
-enum class Scope { Read, Write, WorkingDir };
+//   Memory      the project's memory file (tapto/memory.h), a single file
+//               outside every directory above. It is the one write the editor
+//               makes the model's memory; nothing else reaches it -- no other
+//               tool names it, no command's cwd or %p can, and the protected
+//               checks still refuse it, since ~/.tapto is one of tapto-code's
+//               own folders.
+enum class Scope { Read, Write, WorkingDir, Memory };
 
 // Resolve `input` (absolute, or relative to `base`) and confirm it stays
 // within the sandbox. `base` (default: the sandbox root itself) is the
@@ -225,8 +232,38 @@ enum class Scope { Read, Write, WorkingDir };
 // absolute form is always unambiguous. The set's home root is the working
 // directory under its own label, so "<label>/<rest>" as the folder tools
 // print it comes back here and lands where it came from.
+//
+// Scope::Memory resolves to the project's memory file alone: its directory is
+// outside the sandbox, so it is checked before the sandbox checks, and only an
+// absolute path that resolves to the file (compared canonically, see
+// is_memory_file) gets through. A relative path is never the memory file here:
+// it falls through to the working-directory scope, so a "memory.md" the model
+// means to put in the project is not silently redirected to the central file.
 bool resolve_in_sandbox(const std::string& input, fs::path& out, std::string& error,
                         const fs::path& base = fs::path(), Scope scope = Scope::Read) {
+    if (scope == Scope::Memory) {
+        const fs::path target = memory_path();
+        if (target.empty()) {
+            error = "ERROR: no project memory file (the working directory could not be read)";
+            return false;
+        }
+        const fs::path in_path(input);
+        if (in_path.is_absolute()) {
+            // Every absolute spelling the model has (its own, or the one the
+            // prompt and the tool results showed it) resolves to the same file.
+            std::error_code ec;
+            fs::path resolved = fs::weakly_canonical(in_path, ec);
+            if (ec || resolved.empty()) resolved = in_path;
+            if (is_memory_file(resolved)) {
+                out = target;
+                return true;
+            }
+        }
+        error = "ERROR: '" + input + "' is not the project's memory file (" +
+                target.generic_string() + "). Only that file, by its full path, may be "
+                "read or written outside the working directory.";
+        return false;
+    }
     const fs::path& root = sandbox_root();
     const fs::path anchor = base.empty() ? root : base;
     const bool grants = scope != Scope::WorkingDir && g_folders != nullptr;
@@ -417,7 +454,13 @@ bool in_tapto_dir(const fs::path& resolved, const std::string& input) {
 
 // Refuse a path that a write must not touch. Shared by the editor and by
 // run_command, so a command cannot reach what the editor is refused.
+//
+// The project's memory file is the one exception: it sits in ~/.tapto, which
+// this function's second check would otherwise refuse. It is checked first,
+// so the editor alone reaches it -- run_command, which calls this same
+// function for its cwd and %p paths, still cannot.
 bool refuse_protected_write(const fs::path& resolved, const std::string& input, std::string& error) {
+    if (is_memory_file(resolved)) return false;
     if (in_git_dir(resolved, input)) {
         error = "ERROR: '" + input + "' is inside a repository's git directory, which "
                 "tapto-code never writes to. Use an allow-listed git command instead.";
@@ -437,6 +480,28 @@ bool refuse_protected_write(const fs::path& resolved, const std::string& input, 
 bool resolve_for_write(const std::string& input, fs::path& out, std::string& error) {
     if (!resolve_in_sandbox(input, out, error, fs::path(), Scope::Write)) return false;
     return !refuse_protected_write(out, input, error);
+}
+
+// Resolve a path the model's editor tool wants to reach: like resolve_for_write,
+// except that the editor -- and nothing else -- may name the project's memory
+// file. Scope::Memory makes the memory check come first, so a memory path
+// never falls through to the sandbox's refusal (and the refusal message about
+// the working directory is never the one a memory edit gets).
+bool resolve_for_editor(const std::string& input, fs::path& out, std::string& error) {
+    if (resolve_in_sandbox(input, out, error, fs::path(), Scope::Memory)) {
+        return !refuse_protected_write(out, input, error);
+    }
+    return resolve_for_write(input, out, error);
+}
+
+// Resolve a path the model's editor tool may READ: the sandbox's read scope
+// (the working directory and every granted folder, whatever their mode) plus
+// the project's memory file. Reads get no protected refusal -- the model may
+// look into .git and ~/.tapto -- so this is the plain Read scope with the
+// memory exception added.
+bool resolve_for_read(const std::string& input, fs::path& out, std::string& error) {
+    if (resolve_in_sandbox(input, out, error, fs::path(), Scope::Memory)) return true;
+    return resolve_in_sandbox(input, out, error);
 }
 
 // --- text editor tool -----------------------------------------------------
@@ -468,7 +533,10 @@ std::string execute_text_editor(Context& /*context*/, const json& in) {
             fs::path path;
             {
                 std::string sandbox_err;
-                if (!resolve_in_sandbox(in["path"].get<std::string>(), path, sandbox_err)) {
+                // A read: the read scope (the working directory and every
+                // granted folder, whatever their mode, so .git and read-only
+                // grants stay readable), plus the memory file.
+                if (!resolve_for_read(in["path"].get<std::string>(), path, sandbox_err)) {
                     return sandbox_err;
                 }
             }
@@ -557,7 +625,7 @@ std::string execute_text_editor(Context& /*context*/, const json& in) {
             fs::path path;
             {
                 std::string sandbox_err;
-                if (!resolve_for_write(in["path"].get<std::string>(), path, sandbox_err)) {
+                if (!resolve_for_editor(in["path"].get<std::string>(), path, sandbox_err)) {
                     return sandbox_err;
                 }
             }
@@ -584,7 +652,7 @@ std::string execute_text_editor(Context& /*context*/, const json& in) {
             fs::path path;
             {
                 std::string sandbox_err;
-                if (!resolve_for_write(input, path, sandbox_err)) {
+                if (!resolve_for_editor(input, path, sandbox_err)) {
                     return sandbox_err;
                 }
             }
@@ -609,7 +677,7 @@ std::string execute_text_editor(Context& /*context*/, const json& in) {
 
         if (command == "delete") {
             // Remove a single file. The sandbox, the .git guard, and
-            // read-only-grant refusal all come from resolve_for_write, so a
+            // read-only-grant refusal all come from the editor's resolver, so a
             // delete is exactly as reachable (and as protected) as a write.
             // Directories are refused: there is no recursive delete, so a
             // mis-targeted path can never take a tree (or a repo) with it.
@@ -618,7 +686,7 @@ std::string execute_text_editor(Context& /*context*/, const json& in) {
             fs::path path;
             {
                 std::string sandbox_err;
-                if (!resolve_for_write(input, path, sandbox_err)) {
+                if (!resolve_for_editor(input, path, sandbox_err)) {
                     return sandbox_err;
                 }
             }
@@ -651,7 +719,7 @@ std::string execute_text_editor(Context& /*context*/, const json& in) {
             fs::path path;
             {
                 std::string sandbox_err;
-                if (!resolve_for_write(in["path"].get<std::string>(), path, sandbox_err)) {
+                if (!resolve_for_editor(in["path"].get<std::string>(), path, sandbox_err)) {
                     return sandbox_err;
                 }
             }
@@ -699,7 +767,7 @@ std::string execute_text_editor(Context& /*context*/, const json& in) {
             fs::path path;
             {
                 std::string sandbox_err;
-                if (!resolve_for_write(in["path"].get<std::string>(), path, sandbox_err)) {
+                if (!resolve_for_editor(in["path"].get<std::string>(), path, sandbox_err)) {
                     return sandbox_err;
                 }
             }
@@ -2000,7 +2068,11 @@ std::vector<ToolSpec> builtin_tools() {
         "- str_replace: replace the unique occurrence of old_str with new_str.\n"
         "- insert: insert new_str after line insert_line (0 = beginning).\n"
         "file_text is the content field for create and write only; str_replace and "
-        "insert take their text in new_str.";
+        "insert take their text in new_str.\n"
+        "In addition to the working directory, the project's memory file (named in "
+        "the system prompt) is readable and writable with this tool, at its full "
+        "path as given there. Nothing else outside the working directory is "
+        "reachable.";
     editor.claude_builtin_type = "text_editor_20250728";
     editor.parameters = {
         {"type", "object"},

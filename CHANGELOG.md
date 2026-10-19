@@ -46,6 +46,16 @@ breaking changes and the patch number everything else.)
 
 ## [Unreleased]
 
+### Added
+
+- The model now keeps a memory per project, a Markdown file beside the
+  project's own settings:
+  `~/.tapto/projects/<project>/memory/memory.md`. It can store what it learns
+  about a project there, and the file's first 50 lines act as an index that is
+  carried into every session's system prompt; the model reads the rest of the
+  file with its own editor when the index says it is worth it. The model
+  reaches only that one file outside the project folder, no more.
+
 ## [1.1.0] — 2026-10-04
 
 ### Security
@@ -74,6 +84,17 @@ breaking changes and the patch number everything else.)
 - Requests now tell the server which tapto-code version sent them, so an
   administrator whose requests go through a gateway can see who still runs an
   old version, and can turn it away with a message asking them to update.
+- The prompt line is now edited like a shell prompt on Linux and macOS: the
+  arrow keys move the cursor and recall earlier prompts instead of typing
+  `[A` and friends into it, Backspace and Home/End work, and pasted text
+  keeps its line breaks.
+
+### Fixed
+
+- On Linux, pressing the arrow keys at the prompt inserted the characters
+  `[A`, `[D`, `[B` and `[C` (the terminal's escape sequences for the keys)
+  into your prompt instead of moving the cursor, and those characters were
+  sent to the model with it.
 
 ## [1.0.4] — 2026-09-25
 

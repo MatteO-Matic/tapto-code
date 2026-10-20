@@ -7,7 +7,7 @@ and kept for its notes.
 
 # Backlog
 
-Not scheduled into a release yet. The plugin framework is 1.2.0 below, and
+Not scheduled into a release yet. The plugin framework is 1.3.0 below, and
 moving the project memory into a plugin is listed there.
 
 - [x] **System labels: `@memory` and `@tmp`.** Done for 1.2.0: libtapto
@@ -80,7 +80,7 @@ moving the project memory into a plugin is listed there.
       - Removed when the session ends, or at the next start for a session
         that crashed; `/clear` can go too. The files hold whatever the
         command printed, secrets included, so they should not pile up.
-      - In the core, on every tool result, plugin tools' included (1.2.0).
+      - In the core, on every tool result, plugin tools' included (1.3.0).
       - To decide: what the model gets inline, the first lines, the last, or
         both. A build log's errors are usually at its end.
 - [x] **`/resume` shows where you were.** Print the end of the old
@@ -154,9 +154,10 @@ Open:
 - [x] Found while testing: Backspace after a multi-byte character removed
       one byte of it, and Enter did not move to a new line, so a command's
       output started on the prompt's row.
-- [ ] Release: the next version is a minor one (memory is a feature).
+- [ ] Release as 1.2.0 (memory is a feature), with /resume, [ro] commands,
+      tool overflow and @memory. Decided 20 Oct: plugins wait for 1.3.0.
 - [ ] Longer term the memory becomes a plugin, so an administrator can turn
-      it off (see 1.2.0).
+      it off (see 1.3.0).
 
 ---
 
@@ -209,7 +210,9 @@ machine store and the script folders are write-protected like `.git`.
 
 ---
 
-# 1.2.0: plugins
+# 1.3.0: plugins
+
+Moved from 1.2.0 on 20 Oct, so the memory release does not wait for it.
 
 Features beyond the core come as plugin modules, a DLL/SO each, instead of
 growing tapto-code. The core stays small enough to audit; a customer who

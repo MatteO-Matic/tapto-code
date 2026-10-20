@@ -182,7 +182,7 @@ authenticates the user.
 
 Every request tapto-code sends names it in the `User-Agent` header, as
 `tapto-code/<version> (<commit>; <os>)`, for example
-`tapto-code/1.1.0 (v1.1.0; windows)`. A gateway in front of the provider
+`tapto-code/1.2.0 (v1.2.0; windows)`. A gateway in front of the provider
 (LiteLLM, for one) can log it to see which versions are in use, or refuse a
 version that is too old: tapto-code shows the gateway's error message to the
 user, and does not retry a 4xx. Versions before 1.1.0 send no header of their

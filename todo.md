@@ -107,7 +107,7 @@ moving the project memory into a plugin is listed there.
 
 ---
 
-# Unreleased: project memory, POSIX prompt editing (PR #1)
+# 1.2.0: project memory, POSIX prompt editing (PR #1)
 
 Merged 20 Oct (`6163cd3`, from MatteO-Matic): a per-project memory file at
 `~/.tapto/projects/<project>/memory/memory.md`, whose first 50 lines ride in
@@ -154,8 +154,11 @@ Open:
 - [x] Found while testing: Backspace after a multi-byte character removed
       one byte of it, and Enter did not move to a new line, so a command's
       output started on the prompt's row.
-- [ ] Release as 1.2.0 (memory is a feature), with /resume, [ro] commands,
+- [x] Release as 1.2.0 (memory is a feature), with /resume, [ro] commands,
       tool overflow and @memory. Decided 20 Oct: plugins wait for 1.3.0.
+      Released 20 Oct (local tag `v1.2.0`). Push libtapto `main` and `v0.3.0`
+      **before** tapto-code `main` and `v1.2.0`, then the pin in
+      tapto-code-install.
 - [ ] Longer term the memory becomes a plugin, so an administrator can turn
       it off (see 1.3.0).
 

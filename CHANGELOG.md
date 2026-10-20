@@ -46,15 +46,16 @@ breaking changes and the patch number everything else.)
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-10-20
+
 ### Added
 
 - The model now keeps notes per project in
-  `~/.tapto/projects/<project>/memory/`, with `memory.md` as their index. The
-  first 50 lines of `memory.md` are shown to it at the start of every session
-  in that folder, as its own notes rather than as instructions to follow.
-  It is the only folder in `~/.tapto` the model can change, and only with its
-  file editor, never with a command; open it to see or edit what it has
-  remembered.
+  `~/.tapto/projects/<project>/memory/`, and the first 50 lines of their
+  index, `memory.md`, are shown to it at the start of every session in that
+  folder, as its own notes rather than as instructions to follow. It can
+  change that folder, and nothing else in `~/.tapto`, only with its file
+  editor; open it to see or correct what it has remembered.
 - `command add --ro` (and `/add-command --ro`) adds a command that only
   reads, which the model can then also run in, and point at files in, folders
   you granted read-only with `/add-folder`.
@@ -358,7 +359,8 @@ provider's name when `provider` is absent.
 Initial release: an agent that reads, writes and runs code in a sandboxed
 project directory, against Claude, OpenAI or Gemini. ([d9ac02c])
 
-[Unreleased]: https://github.com/centlakestefan/tapto-code/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/centlakestefan/tapto-code/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/centlakestefan/tapto-code/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/centlakestefan/tapto-code/compare/v1.0.4...v1.1.0
 [1.0.4]: https://github.com/centlakestefan/tapto-code/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/centlakestefan/tapto-code/compare/v1.0.2...v1.0.3

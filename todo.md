@@ -112,8 +112,8 @@ Reviewed the same day. Fixed in `486523b` and `592fe14`:
 
 Open:
 
-- [ ] **Build and try the editor on Linux.** Nothing since `486523b` has been
-      compiled there (WSL here has no compiler); CI is the first build.
+- [x] **Build and try the editor on Linux.** Built and tested in an Ubuntu
+      24.04 container (GCC 13), driven through a pty and rendered with pyte.
 - [ ] Prompt injection that outlives the session: the wording reduces it, it
       does not close it. Structural options: a notice to the user whenever
       the memory file is written, and the index carried in the first user
@@ -122,13 +122,18 @@ Open:
       canonically), so its target becomes writable by the editor. The model
       cannot plant the link; refuse it anyway. Goes away with `@memory`
       (Backlog, system labels).
-- [ ] Editor: the text after the cursor is not drawn (`reprint` stops at
+- [x] Editor: the text after the cursor is not drawn (`reprint` stops at
       `pos`), so moving left hides the rest of the line.
-- [ ] Editor: `char_cols` counts every non-ASCII character as 2 columns, so
-      åäö throw the wrapping off. Needs a `wcwidth`.
-- [ ] Editor: Ctrl-C at the prompt exits with echo and canonical mode off
+- [x] Editor: `char_cols` counts every non-ASCII character as 2 columns, so
+      åäö throw the wrapping off. Now a table of zero-width and wide ranges
+      (`display_cols`); `wcwidth` follows the C locale, which is never set.
+- [x] Editor: Ctrl-C at the prompt exits with echo and canonical mode off
       (ISIG is on and there is no SIGINT handler to restore the terminal).
-- [ ] C4100 on Windows: `read_user_input`'s `prompt` is unused there.
+      Also true of Ctrl-C while the model worked, since before PR #1.
+- [x] C4100 on Windows: `read_user_input`'s `prompt` is unused there.
+- [x] Found while testing: Backspace after a multi-byte character removed
+      one byte of it, and Enter did not move to a new line, so a command's
+      output started on the prompt's row.
 - [ ] Release: the next version is a minor one (memory is a feature).
 - [ ] Longer term the memory becomes a plugin, so an administrator can turn
       it off (see 1.2.0).

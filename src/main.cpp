@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstdlib>
 #include <memory>
 #include <optional>
@@ -41,6 +42,7 @@
 #include <sys/select.h>
 #include <sys/ioctl.h>
 #include <cerrno>
+#include <csignal>
 #endif
 
 using namespace tapto;
@@ -668,7 +670,46 @@ bool win_char_input_pending(HANDLE in) {
 //    line editing itself (arrows, history, pastes), so echo and canonical
 //    mode are disabled there as well. ISIG stays on, so Ctrl-C still raises
 //    SIGINT from the prompt exactly as before.
+//
+// Ctrl-C (or a kill) ends the program without running destructors, so the
+// state to put back is also kept where a signal handler can reach it: the
+// handler restores the terminal and then dies of the same signal, as the
+// program did before. Without it the shell is left with echo and line mode
+// off. The two guards are never active at once, so one saved state does.
 // ---------------------------------------------------------------------------
+#ifndef _WIN32
+termios g_tty_saved{};
+volatile sig_atomic_t g_tty_raw = 0;
+
+void restore_tty_and_reraise(int sig) {
+    if (g_tty_raw) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &g_tty_saved);
+        // The prompt color off and the cursor shown (it is hidden while the
+        // model works), and the shell's prompt on a line of its own.
+        static const char kReset[] = "\x1b[0m\x1b[?25h\n";
+        ssize_t ignored = write(STDOUT_FILENO, kReset, sizeof(kReset) - 1);
+        (void)ignored;
+    }
+    raise(sig); // SA_RESETHAND has put the default action back
+}
+
+void install_tty_restore() {
+    static bool installed = false;
+    if (installed) return;
+    installed = true;
+    struct sigaction sa{};
+    sa.sa_handler = restore_tty_and_reraise;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESETHAND;
+    for (int sig : {SIGINT, SIGTERM, SIGHUP, SIGQUIT}) {
+        struct sigaction old{};
+        // A signal the program was started with ignored stays ignored.
+        if (sigaction(sig, nullptr, &old) == 0 && old.sa_handler == SIG_IGN) continue;
+        sigaction(sig, &sa, nullptr);
+    }
+}
+#endif
+
 struct RawTerminal {
     RawTerminal() {
 #ifndef _WIN32
@@ -677,8 +718,13 @@ struct RawTerminal {
         m_raw.c_lflag &= ~(ICANON | ECHO);
         m_raw.c_cc[VMIN]  = 0;
         m_raw.c_cc[VTIME] = 0;
+        install_tty_restore();
+        g_tty_saved = m_saved;
+        g_tty_raw = 1;
         if (tcsetattr(STDIN_FILENO, TCSANOW, &m_raw) == 0)
             m_active = true;
+        else
+            g_tty_raw = 0;
 #else
         (void)this; // _kbhit works in cooked mode; nothing to do
 #endif
@@ -686,6 +732,7 @@ struct RawTerminal {
     ~RawTerminal() {
 #ifndef _WIN32
         if (m_active) tcsetattr(STDIN_FILENO, TCSANOW, &m_saved);
+        g_tty_raw = 0;
 #else
         (void)this;
 #endif
@@ -741,6 +788,48 @@ void drop_c1_controls(std::string& s) {
     s = std::move(kept);
 }
 
+// The columns a terminal gives the UTF-8 character of `adv` bytes at s[i]: 0
+// for combining marks and joiners, 2 for East Asian wide characters and
+// emoji, 1 for the rest. A table of the common ranges rather than wcwidth(),
+// which follows the C locale this program never sets, and so says -1 for
+// everything past ASCII.
+size_t display_cols(const std::string& s, size_t i, size_t adv) {
+    const auto byte = [&](size_t k) { return static_cast<unsigned char>(s[i + k]); };
+    uint32_t cp = byte(0);
+    if (adv == 2) cp = ((cp & 0x1F) << 6) | (byte(1) & 0x3F);
+    else if (adv == 3) cp = ((cp & 0x0F) << 12) | ((byte(1) & 0x3F) << 6) | (byte(2) & 0x3F);
+    else if (adv == 4)
+        cp = ((cp & 0x07) << 18) | ((byte(1) & 0x3F) << 12) | ((byte(2) & 0x3F) << 6) |
+             (byte(3) & 0x3F);
+    struct Range { uint32_t lo, hi; };
+    static const Range kZero[] = {
+        {0x0300, 0x036F}, {0x0483, 0x0489}, {0x0591, 0x05BD}, {0x0610, 0x061A},
+        {0x064B, 0x065F}, {0x1AB0, 0x1AFF}, {0x1DC0, 0x1DFF}, {0x200B, 0x200F},
+        {0x20D0, 0x20FF}, {0xFE00, 0xFE0F}, {0xFE20, 0xFE2F}, {0xE0100, 0xE01EF},
+    };
+    static const Range kWide[] = {
+        {0x1100, 0x115F}, {0x231A, 0x231B}, {0x23E9, 0x23EC}, {0x2614, 0x2615},
+        {0x26A1, 0x26A1}, {0x26AA, 0x26AB}, {0x26BD, 0x26BE}, {0x26C4, 0x26C5},
+        {0x26D4, 0x26D4}, {0x26EA, 0x26EA}, {0x26F2, 0x26F5}, {0x26FA, 0x26FD},
+        {0x2705, 0x2705}, {0x270A, 0x270B}, {0x2728, 0x2728}, {0x274C, 0x274C},
+        {0x2753, 0x2755}, {0x2757, 0x2757}, {0x2795, 0x2797}, {0x27B0, 0x27B0},
+        {0x2B1B, 0x2B1C}, {0x2B50, 0x2B50}, {0x2B55, 0x2B55}, {0x2E80, 0x303E},
+        {0x3041, 0x33FF}, {0x3400, 0x4DBF}, {0x4E00, 0x9FFF}, {0xA000, 0xA4CF},
+        {0xA960, 0xA97F}, {0xAC00, 0xD7A3}, {0xF900, 0xFAFF}, {0xFE10, 0xFE19},
+        {0xFE30, 0xFE6F}, {0xFF00, 0xFF60}, {0xFFE0, 0xFFE6}, {0x1F004, 0x1F004},
+        {0x1F0CF, 0x1F0CF}, {0x1F18E, 0x1F18E}, {0x1F191, 0x1F19A}, {0x1F200, 0x1F251},
+        {0x1F300, 0x1F64F}, {0x1F680, 0x1F6FF}, {0x1F7E0, 0x1F7EB}, {0x1F900, 0x1F9FF},
+        {0x1FA70, 0x1FAFF}, {0x20000, 0x2FFFD}, {0x30000, 0x3FFFD},
+    };
+    for (const Range& r : kZero) {
+        if (cp >= r.lo && cp <= r.hi) return 0;
+    }
+    for (const Range& r : kWide) {
+        if (cp >= r.lo && cp <= r.hi) return 2;
+    }
+    return 1;
+}
+
 // Read one line from a terminal, with the program doing its own line
 // editing (echo off). The arrow keys' ESC sequences are consumed as cursor
 // moves and history recall instead of being recorded as "[A" and friends.
@@ -778,49 +867,36 @@ bool posix_read_line(const std::string& prompt_text, std::string& out) {
         if (adv > s.size() - i) adv = s.size() - i;
         return i + adv;
     };
-    // Display width (columns) of the character at i: a coarse bound, good
-    // enough to avoid wrapping inside a visible character.
-    auto char_cols = [&](const std::string& s, size_t i) -> size_t {
-        if (i >= s.size()) return 0;
-        unsigned char b = static_cast<unsigned char>(s[i]);
-        return (b >= 0xC0) ? 2 : 1;
-    };
-
-    // Start of the UTF-8 character that ends at `p` (a cursor position).
+    // Start of the UTF-8 character that ends at `p` (a cursor position): back
+    // over its continuation bytes to its lead byte.
     auto prev_char_start = [&](size_t p) -> size_t {
-        size_t start = p;
-        while (start > 0) {
-            size_t prev = start - 1;
-            size_t adv = next_char(line, prev) - prev;
-            if (prev + adv == start) return prev;
-            --start;
-        }
-        return 0;
+        if (p == 0) return 0;
+        size_t start = p - 1;
+        while (start > 0 && (static_cast<unsigned char>(line[start]) & 0xC0) == 0x80) --start;
+        return start;
     };
 
-    // Screen lines the echo occupies after the last reprint, so a reprint can
-    // move back to the top of the block before clearing it.
-    size_t printed_lines = 1;
+    // The screen row the cursor is on, counted from the block's first row (the
+    // prompt's), so a reprint can move back up to the top before clearing.
+    size_t cursor_row = 0;
     // The chat loop shows the cursor at the prompt (\x1b[?25h) and hides it
     // while the model works, so a reprint must leave it visible: an erase
     // that leaves the cursor where it hid would hide it again. Starts shown
     // because the prompt is printed with the cursor visible.
     static bool cursor_shown = true;
-    // Redraw the prompt and the line, cursor at the edit position. The
-    // current line and everything below it (wrapped remainder, blank screen)
-    // is cleared first, and every wrapped line is cleared before its new
-    // content, so no stale character can survive a redraw.
+    // Redraw the prompt and the whole line, then put the cursor at the edit
+    // position. The block is cleared from its first row down before it is
+    // drawn, so no stale character survives a redraw.
     auto reprint = [&]() {
-        std::string up;
-        up.reserve(3 * printed_lines);
-        for (size_t k = 1; k < printed_lines; ++k) up += "\x1b[1A";
-        std::cout << up << "\r\x1b[J";
+        if (cursor_row) std::cout << "\x1b[" << cursor_row << "A";
+        std::cout << "\r\x1b[J";
         if (!cursor_shown) {
             std::cout << "\x1b[?25h";
             cursor_shown = true;
         }
-        size_t used = 0; // columns used on the current line
-        size_t wraps = 0;
+        size_t used = 0; // columns used on the current row
+        size_t row = 0;  // the current row, from the block's first
+        size_t cur_row = 0, cur_col = 0; // where the edit position is drawn
         auto start_line = [&]() {
             // The marker and the typed text are echoed in the prompt color,
             // so what the user writes stands out from the model's plain
@@ -831,34 +907,46 @@ bool posix_read_line(const std::string& prompt_text, std::string& out) {
             std::cout << kPromptColor << prompt_text << kPromptReset;
             used = prompt_text.size();
         };
+        // The row is full: move down to the next one, already empty (cleared
+        // above), and start it with the prompt again.
+        auto wrap = [&]() {
+            std::cout << "\n";
+            ++row;
+            start_line();
+        };
+        const size_t cols = static_cast<size_t>(term_cols);
         start_line();
         size_t i = 0;
         while (i < line.size()) {
             size_t adv = next_char(line, i) - i;
-            if (line[i] == '\n') { // a pasted line break: next physical line,
-                // plain (no prompt)
+            if (line[i] == '\n') { // a pasted line break: next row, plain (no prompt)
+                if (i == pos) { cur_row = row; cur_col = used; }
                 std::cout << "\n";
+                ++row;
                 used = 0;
-                ++wraps;
                 i += adv;
-                if (i >= pos) break; // the rest stays cleared
                 continue;
             }
-            size_t w = char_cols(line, i);
-            if (used + w > static_cast<size_t>(term_cols)) {
-                // The line is full: wrap to the next physical line. It is
-                // already empty (cleared at the top), so just move down and
-                // start the prompt again.
-                std::cout << "\n";
-                start_line();
-                ++wraps;
-            }
+            size_t w = display_cols(line, i, adv);
+            if (used + w > cols) wrap();
+            if (i == pos) { cur_row = row; cur_col = used; }
             std::cout << kPromptColor << line.substr(i, adv) << kPromptReset;
             used += w;
             i += adv;
-            if (i >= pos) break; // the rest stays cleared
         }
-        printed_lines = wraps + 1;
+        if (pos >= line.size()) {
+            // At the end of a full row the terminal holds the cursor in the
+            // last column until the next character; wrap now instead, so the
+            // cursor is where the next character will go.
+            if (used >= cols) wrap();
+            cur_row = row;
+            cur_col = used;
+        }
+        // From the end of the drawing back to the edit position.
+        if (row > cur_row) std::cout << "\x1b[" << (row - cur_row) << "A";
+        std::cout << "\r";
+        if (cur_col) std::cout << "\x1b[" << cur_col << "C";
+        cursor_row = cur_row;
         std::cout << std::flush;
     };
 
@@ -918,14 +1006,20 @@ bool posix_read_line(const std::string& prompt_text, std::string& out) {
 
     // Submit the current line: into the history if it is new, out to the
     // caller. `hist_pos` resets with it: the line being edited is no longer
-    // a recall from history. The next prompt block comes on a fresh screen
-    // line (the model's reply prints in between), so the reprint bookkeeping
-    // starts over: the next redraw must not reach back up into this one.
+    // a recall from history. The cursor goes to the end of the block and on
+    // to a new line, as the terminal's own echo of Enter would, so what
+    // prints next (a command's output, the next prompt) starts below the
+    // whole line, not over the part after the cursor.
     auto submit = [&]() -> bool {
+        if (pos != line.size()) {
+            pos = line.size();
+            reprint();
+        }
+        std::cout << "\r\n" << std::flush;
         if (!line.empty() && (history.empty() || history.back() != line))
             history.push_back(line);
         hist_pos = 0;
-        printed_lines = 1;
+        cursor_row = 0;
         out = std::move(line);
         return true;
     };
@@ -1091,6 +1185,8 @@ bool read_user_input(std::string& out, const std::string& prompt = "> ") {
         if (posix_read_line(prompt, out)) return true;
         return false; // EOF
     }
+#else
+    (void)prompt; // the console does its own echo and editing
 #endif
 
 #ifdef _WIN32

@@ -65,6 +65,9 @@ breaking changes and the patch number everything else.)
 - On Linux and macOS, the arrow keys at the prompt typed `[A`, `[D` and the
   like into your prompt, and sent them to the model. They now move the cursor
   and recall earlier prompts, as in a shell.
+- On Linux and macOS, pressing Ctrl-C while the model was working left your
+  terminal not showing what you typed until you ran `reset`. The terminal is
+  now put back as it was.
 
 ## [1.1.0] — 2026-10-04
 

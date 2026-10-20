@@ -243,49 +243,88 @@ already (schema out, arguments in, text back), so a small vtable carries any
 plugin, and a small vtable is one that stays stable.
 
 ```cpp
-// Exported by each module; the DllGetClassObject of this system.
-extern "C" SRESULT C_API TaptoGetPlugin(const GUID& riid, void** ppv);
+// Exported by each module; the DllGetClassObject of this system. The host
+// comes first, so the plugin can allocate before its first call returns.
+extern "C" SRESULT SCOM_CALL TaptoGetPlugin(ITaptoHost* host, const GUID& riid,
+                                            void** ppv);
 // OK once no object of the module is alive; see /remove-plugin below.
-extern "C" SRESULT C_API TaptoCanUnloadNow();
+extern "C" SRESULT SCOM_CALL TaptoCanUnloadNow();
 
 interface ITaptoPlugin : public IBase {
     // {name, version, config_keys[], prompt,
     //  tools[{name, description, schema, writes}]}
-    virtual SRESULT C_API Describe(char** json_out) = 0;
+    virtual SRESULT SCOM_CALL Describe(char*& json_out) = 0;
     // The plugin's own config keys, secrets already resolved by the host.
-    virtual SRESULT C_API Configure(ITaptoHost* host, const char* json_config) = 0;
-    virtual SRESULT C_API CallTool(const char* name, const char* json_args,
-                                   char** result_out) = 0;
+    virtual SRESULT SCOM_CALL Configure(const char* json_config) = 0;
+    virtual SRESULT SCOM_CALL CallTool(const char* name, const char* json_args,
+                                       char*& result_out) = 0;
 };
 
 // Optional, found by QueryInterface: a plugin that can be unloaded.
 interface ITaptoPluginUnload : public IBase {
-    virtual SRESULT C_API Shutdown() = 0; // close connections, stop threads
+    virtual SRESULT SCOM_CALL Shutdown() = 0; // close connections, stop threads
 };
 
 // Optional, found by QueryInterface: prompt text that changes, asked for
 // each time the system prompt is rebuilt (Describe's `prompt` is fixed).
 interface ITaptoPluginPrompt : public IBase {
-    virtual SRESULT C_API Prompt(char** text_out) = 0;
+    virtual SRESULT SCOM_CALL Prompt(char*& text_out) = 0;
 };
 
 // What a plugin may ask of the core.
 interface ITaptoHost : public IBase {
-    virtual SRESULT C_API Log(const char* line) = 0;     // to the trace file
-    virtual SRESULT C_API IsCancelled() = 0;             // ESC, for long calls
+    // The one heap for all memory that crosses the boundary: strings now,
+    // arrays of structs if an interface ever needs them. Aligned as malloc
+    // is (alignof(max_align_t)); null on failure.
+    virtual void* SCOM_CALL MemAlloc(size_t size) = 0;
+    virtual void SCOM_CALL MemFree(void* p) = 0;        // null is fine
+    virtual SRESULT SCOM_CALL Log(const char* line) = 0; // to the trace file
+    virtual SRESULT SCOM_CALL IsCancelled() = 0;         // ESC, for long calls
     // Put a file in @tmp for the model to read (a downloaded attachment);
     // `label_path_out` is "@tmp/<name>", for the plugin's result text.
-    virtual SRESULT C_API WriteTemp(const uint8_t* data, size_t size,
-                                    const char* name_hint,
-                                    char** label_path_out) = 0;
+    virtual SRESULT SCOM_CALL WriteTemp(const uint8_t* data, size_t size,
+                                        const char* name_hint,
+                                        char*& label_path_out) = 0;
 };
 ```
 
-Strings coming back (`json_out`, `result_out`) are allocated with
-`sComStringAlloc`/`sComStringDup` and freed by the host with
-`sComStringFree`. A new capability is a new interface (`ITaptoPlugin2`)
-found by QueryInterface, so old plugins load in new hosts and the other way
-round.
+A new capability is a new interface (`ITaptoPlugin2`) found by
+QueryInterface, so old plugins load in new hosts and the other way round.
+
+## Memory across the boundary
+
+The sCom convention: an in-string is `const char*`, an out or inout string
+is `char*&` in C++ and `char**` in C (the same thing in the vtable, a
+reference is passed as a pointer). Everything that crosses and is freed on
+the other side is allocated with `ITaptoHost::MemAlloc` and freed with
+`MemFree`, so allocation and free are always the host's, whatever compiler
+built the plugin. For an inout parameter the callee frees the old value
+before it stores the new one.
+
+Today only strings cross (JSON carries anything structured). If a call
+ever needs an array, it is a pointer and a count, out as `T*&` plus
+`size_t&`, the block from `MemAlloc`, and `T` a plain C struct: fixed-width
+fields from `<cstdint>`, strings in it as `char*` from the same heap, no
+STL, no virtuals. Freeing it frees each string and then the block.
+
+The host pointer from `TaptoGetPlugin` goes into a global in the plugin
+(`AddRef`ed there, released in `Shutdown` or the last `Release`); a module is
+loaded once per process and the host outlives every plugin, so one global is
+enough. In the host the same global points at its own `ITaptoHost`.
+
+`plugin.h` carries one RAII class, `TaptoString`, used on both sides through
+that global: it owns a `char*` from `MemAlloc`, frees it with `MemFree`,
+hands out `char*&` for an out parameter (freeing what it held first) and
+`detach()`es to pass ownership on. Inside the plugin, `std::string` and its
+own heap are fine; only what crosses goes through `TaptoString`. The one
+mistake left is returning a string from another allocator (cpr's
+`sComStringDup` linked in statically, `strdup`): the rule is in `plugin.h`,
+and the test host in a debug build tags its allocations and refuses to free
+one it did not make.
+
+No `scom.dll` / `libscom.so`, then: the allocator lives behind the
+interface, and nothing but a header is shared. A plugin needs only a C ABI,
+so any compiler, and any language with a C FFI, can build one.
 
 ## The core decides, so no plugin can get it wrong
 
@@ -363,29 +402,25 @@ until exit, which is always safe.
 worded like the folder commands. `plugins = jira:ro` in config for a project
 that always wants it.
 
-## One heap: `scom.dll` / `libscom.so`
+## Why not STL across the boundary, and why libtapto stays static
 
-The allocator has to be one module's, or a string allocated in the plugin
-is freed on another CRT's heap: the class of bug the MinGW libcrypto
-`FILE*` crash was (see the libtapto port notes below). As in other systems
-built on sCom, `sComStringDup` / `sComStringFree` and the buffer functions
-live in one small shared library, `scom.dll` beside `tapto-code.exe`
-(`libscom.so`, rpath `$ORIGIN/..` from the plugins). A plugin in `plugins\`
-binds to the copy already loaded in the process, since Windows matches a
-loaded module by name.
+Decided 20 Oct, after the sCom shared library was dropped. Passing
+`std::string` with a custom allocator would fix the heap but not the
+layout: MSVC's STL, libstdc++ and libc++ differ, and so do MSVC Debug and
+Release (`_ITERATOR_DEBUG_LEVEL`). A mismatch corrupts memory instead of
+failing to link. Only JSON crosses this boundary, so the comfort of
+containers is not worth tying every plugin to the host's compiler.
 
-libtapto itself stays static. Its API is C++ (`std::string`,
+The same reason keeps libtapto static. Its API is C++ (`std::string`,
 `nlohmann::json`), so as a DLL it would tie every program and plugin to one
 compiler, CRT and STL, and tapto-word builds with MinGW while tapto-code
-builds with MSVC. scom's API is C and is 83 lines (`cpr/common/com.cpp`): a
-plugin built with any compiler can call it, and it is the only shared code
-in the audit.
+builds with MSVC.
 
 ## Vendoring `cpr/com.h` as `scom.h`
 
-In libtapto (`include/tapto/scom.h` plus the scom shared-library target), so
-tapto-code, tapto-jira and every plugin compile against one copy at one
-pinned tag. The header comment names the cpr commit it came from.
+Header-only, in libtapto (`include/tapto/scom.h`), so tapto-code, tapto-jira
+and every plugin compile against one copy at one pinned tag. The header
+comment names the cpr commit it came from.
 
 It is cleaned up on the way in, keeping the binary layout cpr's modules
 have:
@@ -414,21 +449,22 @@ have:
   includes it. `interface` stays a keyword-like macro only if nothing
   better reads as well; `struct` is what it expands to anyway.
 - **Only what the plugin system uses:** IBase, GUID and `DEFINE_IID`, the
-  interface-map macros, `sComPtr`/`sComQIPtr`, the string and buffer
-  functions. The IPC error codes and typeinfo that belong to clcom's larger
+  interface-map macros, `sComPtr`/`sComQIPtr`. Not the string and buffer
+  functions (`ITaptoHost` allocates), and not the IPC error codes and typeinfo that belong to clcom's larger
   design stay behind.
 
 ## Order of work
 
-- [ ] libtapto: `scom.h` (vendored) and the scom shared library;
-      `tapto/plugin.h`; a test plugin built in-tree and a test that loads it,
-      calls it, and unloads it through both paths.
+- [ ] libtapto: `scom.h` (vendored, header-only); `tapto/plugin.h` with
+      `TaptoString`; a test plugin built in-tree and a test that loads it,
+      calls it, and unloads it through both paths, and whose debug host
+      refuses to free a string it did not allocate.
 - [ ] tapto-code: the loader (install-dir only, signature check), ro/rw
       filtering, tool-name rule, secrets and config keys, the three commands,
       the policy keys and ADMX, plugins in `session.json`.
 - [ ] `jira.dll`: tapto-jira's `jira.cpp` behind `ITaptoPlugin`, its read
       tools ro and create/update/comment/transition rw.
-- [ ] Installer: `plugins\` and `scom.dll` in the MSI, the plugin signed in
+- [ ] Installer: `plugins\` in the MSI, the plugin signed in
       the same job; plugins as their own feature or their own MSI, to decide.
 - [ ] Open: tapto-jira as a thin host around the same plugin, or retired.
 - [ ] The project memory (PR #1, today in the core) as a plugin, so an

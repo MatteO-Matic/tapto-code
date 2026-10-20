@@ -221,14 +221,6 @@ in your files but not in the conversation. A new conversation replaces the
 saved one with its first turn. Resuming prints about a screenful of the end of
 the conversation, so you can see where you left off.
 
-**Long command output.** When a command prints more than about 16 KB, the model
-gets its first and last lines and a note saying which lines were left out and
-where the whole output is: a file in this session's own folder, which the model
-knows as `@tmp` (`~/.tapto/projects/<folder>/tmp/<session>/`). It reads or
-searches the rest there as it needs. The model can read `@tmp` but nothing can
-write to it, and the folder is removed when the session ends (or, after a
-crash, when the next session in any folder of the project starts).
-
 `/resume` also undoes `/clear`: the cleared conversation is set aside, and
 stays on disk until your next turn, so `--resume` brings it back too. When a
 conversation is already under way, `/resume` sets that one aside instead of
@@ -236,6 +228,24 @@ dropping it, and a second `/resume` switches back. The history is in the
 provider's own format, so it resumes only with a provider of the same type
 (claude, openai or gemini). The file holds whatever the model read, as the
 trace file does.
+
+**The model's memory.** The model keeps notes about the project in a folder of
+its own, `~/.tapto/projects/<folder>/memory/`, which it knows as `@memory`:
+decisions you made, conventions, where things live, where the work stands.
+`memory.md` is the index, and its first 50 lines are shown to the model at the
+start of every session in that folder, as its own notes and not as
+instructions; it reads the rest, and any other note it keeps there, when the
+index says it is worth it. Only its file editor writes there, never a command,
+and nothing outside the folder is reachable through it. Open the folder to see
+or correct what it remembered.
+
+**Long command output.** When a command prints more than about 16 KB, the model
+gets its first and last lines and a note saying which lines were left out and
+where the whole output is: a file in this session's own folder, which the model
+knows as `@tmp` (`~/.tapto/projects/<folder>/tmp/<session>/`). It reads or
+searches the rest there as it needs. The model can read `@tmp` but nothing can
+write to it, and the folder is removed when the session ends (after a crash,
+when the next session in that folder starts).
 
 **Reading beyond the working directory.** The file tools are confined to the
 directory tapto-code was started in. To let the model read something else — a

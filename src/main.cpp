@@ -1464,6 +1464,13 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
             ui::print_warning("long tool output will be cut, not kept: " + err);
         }
     }
+    // The project's memory, reached as @memory (tapto/memory.h).
+    bool has_memory = false;
+    if (const std::string err = add_memory_folder(folders); err.empty()) {
+        has_memory = true;
+    } else {
+        ui::print_warning("no project memory this session: " + err);
+    }
     set_granted_folders(&folders); // outlives the chat loop below
     auto rebuild_tools_and_prompt = [&]() {
         context.tools = builtin_tools();
@@ -1474,10 +1481,11 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
         if (const std::string extra = folder_prompt(folders); !extra.empty()) {
             prompt += "\n\n" + extra;
         }
-        // The project's memory file: where it lives, the index rule, and the
-        // index itself. Rebuilt with the rest of the prompt, so a memory the
-        // model writes mid-session is picked up at the next rebuild.
-        if (const std::string extra = memory_prompt(); !extra.empty()) {
+        // The project's memory: where it lives, the index rule, and the index
+        // itself. Rebuilt with the rest of the prompt, so a memory the model
+        // writes mid-session is picked up at the next rebuild.
+        if (const std::string extra = has_memory ? memory_prompt() : std::string();
+            !extra.empty()) {
             prompt += "\n\n" + extra;
         }
         client->setSystemPrompt(prompt);

@@ -49,11 +49,12 @@ breaking changes and the patch number everything else.)
 ### Added
 
 - The model now keeps notes per project in
-  `~/.tapto/projects/<project>/memory/memory.md`, and the first 50 lines of
-  that file are shown to it at the start of every session in that folder, as
-  its own notes rather than as instructions to follow.
-  It is the only file in `~/.tapto` the model can change; open it to see or
-  edit what it has remembered.
+  `~/.tapto/projects/<project>/memory/`, with `memory.md` as their index. The
+  first 50 lines of `memory.md` are shown to it at the start of every session
+  in that folder, as its own notes rather than as instructions to follow.
+  It is the only folder in `~/.tapto` the model can change, and only with its
+  file editor, never with a command; open it to see or edit what it has
+  remembered.
 - `command add --ro` (and `/add-command --ro`) adds a command that only
   reads, which the model can then also run in, and point at files in, folders
   you granted read-only with `/add-folder`.

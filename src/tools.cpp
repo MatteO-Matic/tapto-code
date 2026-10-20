@@ -215,12 +215,12 @@ bool in_read_only_program_folder(const fs::path& resolved) {
 //               letting the model edit a folder and letting it run the
 //               project's own build there is the same trust.
 //   WorkingDir  the working directory alone.
-//   Memory      the project's memory file (tapto/memory.h), a single file
-//               outside every directory above. It is the one write the editor
-//               makes the model's memory; nothing else reaches it -- no other
-//               tool names it, and no command's cwd or %p can, since the
-//               protected checks refuse it as part of ~/.tapto.
-enum class Scope { Read, Write, WorkingDir, Memory };
+//
+// tapto-code's own folders (@tmp, @memory) are in the folder set too, under
+// '@' labels, so Read and Write reach them by their mode like any grant. They
+// are in ~/.tapto, so refuse_protected_write still refuses every write there;
+// resolve_for_editor lets the editor alone write in a writable one (@memory).
+enum class Scope { Read, Write, WorkingDir };
 
 // Resolve `input` (absolute, or relative to `base`) and confirm it stays
 // within the sandbox. `base` (default: the sandbox root itself) is the
@@ -238,39 +238,10 @@ enum class Scope { Read, Write, WorkingDir, Memory };
 // own subfolder always wins over a grant that happens to share its name; the
 // absolute form is always unambiguous. The set's home root is the working
 // directory under its own label, so "<label>/<rest>" as the folder tools
-// print it comes back here and lands where it came from.
-//
-// Scope::Memory resolves to the project's memory file alone: its directory is
-// outside the sandbox, so it is checked before the sandbox checks, and only an
-// absolute path that resolves to the file (compared canonically, see
-// is_memory_file) gets through. A relative path is never the memory file here:
-// it falls through to the working-directory scope, so a "memory.md" the model
-// means to put in the project is not silently redirected to the central file.
+// print it comes back here and lands where it came from. tapto-code's own
+// '@' labels are never shadowed by a project entry.
 bool resolve_in_sandbox(const std::string& input, fs::path& out, std::string& error,
                         const fs::path& base = fs::path(), Scope scope = Scope::Read) {
-    if (scope == Scope::Memory) {
-        const fs::path target = memory_path();
-        if (target.empty()) {
-            error = "ERROR: no project memory file (the working directory could not be read)";
-            return false;
-        }
-        const fs::path in_path(input);
-        if (in_path.is_absolute()) {
-            // Every absolute spelling the model has (its own, or the one the
-            // prompt and the tool results showed it) resolves to the same file.
-            std::error_code ec;
-            fs::path resolved = fs::weakly_canonical(in_path, ec);
-            if (ec || resolved.empty()) resolved = in_path;
-            if (is_memory_file(resolved)) {
-                out = target;
-                return true;
-            }
-        }
-        error = "ERROR: '" + input + "' is not the project's memory file (" +
-                target.generic_string() + "). Only that file, by its full path, may be "
-                "read or written outside the working directory.";
-        return false;
-    }
     const fs::path& root = sandbox_root();
     const fs::path anchor = base.empty() ? root : base;
     const bool grants = scope != Scope::WorkingDir && g_folders != nullptr;
@@ -469,9 +440,9 @@ bool in_tapto_dir(const fs::path& resolved, const std::string& input) {
 // Refuse a path that a write must not touch. Shared by the editor and by
 // run_command, so a command cannot reach what the editor is refused.
 //
-// The project's memory file sits in ~/.tapto and is refused here like the
+// The project's memory (@memory) sits in ~/.tapto and is refused here like the
 // rest of it: the editor's exception lives in resolve_for_editor alone, so a
-// command's cwd or %p path never reaches the file, not even through a writable
+// command's cwd or %p path never reaches it, not even through a writable
 // grant that covers the home folder.
 bool refuse_protected_write(const fs::path& resolved, const std::string& input, std::string& error) {
     if (in_git_dir(resolved, input)) {
@@ -488,32 +459,23 @@ bool refuse_protected_write(const fs::path& resolved, const std::string& input, 
     return false;
 }
 
-// Resolve a path the model wants to write to: sandboxed, and never in a git
-// directory or tapto-code's own folders.
-bool resolve_for_write(const std::string& input, fs::path& out, std::string& error) {
+// Resolve a path the model's editor tool wants to write: sandboxed, and never
+// in a git directory or tapto-code's own folders -- except that the editor,
+// and nothing else, may write in tapto-code's own writable folders (@memory),
+// which refuse_protected_write refuses as part of ~/.tapto. This is the one
+// place that exception is made. The folder's own rules still hold: nothing
+// outside it, and no symlink out of it.
+bool resolve_for_editor(const std::string& input, fs::path& out, std::string& error) {
     if (!resolve_in_sandbox(input, out, error, fs::path(), Scope::Write)) return false;
+    if (const Folder* f = granted_owner(out, /*writable_only=*/true); f && f->system) return true;
     return !refuse_protected_write(out, input, error);
 }
 
-// Resolve a path the model's editor tool wants to reach: like resolve_for_write,
-// except that the editor -- and nothing else -- may name the project's memory
-// file. Scope::Memory makes the memory check come first, so a memory path
-// never falls through to the sandbox's refusal (and the refusal message about
-// the working directory is never the one a memory edit gets). The memory file
-// skips refuse_protected_write, which refuses all of ~/.tapto: this is the one
-// place that exception is made.
-bool resolve_for_editor(const std::string& input, fs::path& out, std::string& error) {
-    if (resolve_in_sandbox(input, out, error, fs::path(), Scope::Memory)) return true;
-    return resolve_for_write(input, out, error);
-}
-
 // Resolve a path the model's editor tool may READ: the sandbox's read scope
-// (the working directory and every granted folder, whatever their mode) plus
-// the project's memory file. Reads get no protected refusal -- the model may
-// look into .git and ~/.tapto -- so this is the plain Read scope with the
-// memory exception added.
+// (the working directory and every folder in the set, whatever their mode,
+// tapto-code's own included). Reads get no protected refusal -- the model may
+// look into .git and ~/.tapto.
 bool resolve_for_read(const std::string& input, fs::path& out, std::string& error) {
-    if (resolve_in_sandbox(input, out, error, fs::path(), Scope::Memory)) return true;
     return resolve_in_sandbox(input, out, error);
 }
 
@@ -2098,10 +2060,10 @@ std::vector<ToolSpec> builtin_tools() {
         "- insert: insert new_str after line insert_line (0 = beginning).\n"
         "file_text is the content field for create and write only; str_replace and "
         "insert take their text in new_str.\n"
-        "In addition to the working directory, the project's memory file (named in "
-        "the system prompt) is readable and writable with this tool, at its full "
-        "path as given there. Nothing else outside the working directory is "
-        "reachable.";
+        "Beyond the working directory, this tool reaches the folders the user "
+        "granted and tapto-code's own folders, named with an '@' label: @memory "
+        "(your notes, read and write) and @tmp (long tool output, read-only). "
+        "Address a file in one as <label>/<path>, e.g. @memory/memory.md.";
     editor.claude_builtin_type = "text_editor_20250728";
     editor.parameters = {
         {"type", "object"},

@@ -10,9 +10,10 @@ and kept for its notes.
 Not scheduled into a release yet. The plugin framework is 1.2.0 below, and
 moving the project memory into a plugin is listed there.
 
-- [ ] **System labels: `@memory` and `@tmp`.** `@tmp` done for 1.2.0:
-      libtapto `v0.3.0` (`FolderSet::add_system`, deepest owner wins),
-      tapto-code `@tmp`. `@memory` still to do. The project's own folders
+- [x] **System labels: `@memory` and `@tmp`.** Done for 1.2.0: libtapto
+      `v0.3.0` (`FolderSet::add_system`, deepest owner wins), `@tmp` and
+      `@memory` in tapto-code; `Scope::Memory` and `is_memory_file` are gone,
+      and the symlink item under PR #1 with them. The project's own folders
       under `~/.tapto/projects/<project>/`, reachable by label the way
       `/add-folder` grants are, so the model, the tool results and the
       prompt name them the same short way in every session.
@@ -65,7 +66,7 @@ moving the project memory into a plugin is listed there.
       keeps all of a command's output in memory, so a runaway command can
       exhaust it; a cap (say 50 MB, the rest discarded with a note) belongs
       there. Original notes:
-- [ ] ~~Tool overflow~~ When a tool's output passes the limit (a large
+      When a tool's output passes the limit (a large
       `git status`, a build log), the whole output is written to a file in
       `@tmp` and the model gets what fits, plus a line saying where the rest
       is: "The output was cut. Lines 500-1132 are in `@tmp/sdjksf.txt`." It
@@ -137,7 +138,7 @@ Open:
       does not close it. Structural options: a notice to the user whenever
       the memory file is written, and the index carried in the first user
       message instead of the system prompt.
-- [ ] A symlinked `memory.md` is followed (`is_memory_file` compares
+- [x] A symlinked `memory.md` is followed (`is_memory_file` compares
       canonically), so its target becomes writable by the editor. The model
       cannot plant the link; refuse it anyway. Goes away with `@memory`
       (Backlog, system labels).

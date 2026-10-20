@@ -5,6 +5,136 @@ and kept for its notes.
 
 ---
 
+# Backlog
+
+Not scheduled into a release yet. The plugin framework is 1.2.0 below, and
+moving the project memory into a plugin is listed there.
+
+- [ ] **System labels: `@memory` and `@tmp`.** The project's own folders
+      under `~/.tapto/projects/<project>/`, reachable by label the way
+      `/add-folder` grants are, so the model, the tool results and the
+      prompt name them the same short way in every session.
+
+      How labels work today (libtapto `fstools.h/.cpp`, `tools.cpp`): a
+      grant's label is the folder's last component, made unique with `-2`,
+      `-3` (`label_for`). The model writes `<label>/<rest>` or an absolute
+      path, and tool results print `<label>/<rest>` (`display()`), so what
+      the model was shown resolves back. A label is taken only when the
+      project has no entry of that name: the project's own files win. Each
+      grant is ro or rw: reads reach every grant; the editor's writes and a
+      command's `cwd`/`%p` need rw; `.git` and `~/.tapto` are refused for
+      every write on top. `session.json` saves path and mode only, and
+      labels are derived again on `/resume`. The working directory is
+      already a program-owned entry (`set_home`): not removable, its mode
+      fixed, kept by `clear()`, not counted by `has_grants()`.
+
+      | label | folder | mode |
+      |---|---|---|
+      | `@memory` | `~/.tapto/projects/<p>/memory/` | rw, the editor only |
+      | `@tmp` | `~/.tapto/projects/<p>/tmp/` | ro, only tapto-code writes |
+
+      - libtapto: `FolderSet::add_system(label, path, writable)`, program
+        owned like `set_home`. New libtapto tag, then the pin here.
+      - `@` marks system labels only: a folder name does not normally have
+        it, so they never clash with a grant. Unlike grants, a system label
+        wins over a project entry of the same name (a project folder called
+        `@memory` does not shadow it).
+      - The `~/.tapto` write refusal still applies. Only the editor skips it
+        for `@memory`, in `resolve_for_editor` as today, so no command writes
+        there. A [ro] command (below) could take `%p` paths in `@tmp`.
+      - Not saved in `session.json`: the paths come from the working
+        directory, and are set up again at every start.
+      - `Scope::Memory` and `is_memory_file` go: the folder rules replace
+        them. That closes the symlink item under PR #1, since a folder's
+        resolution canonicalizes before the under-root check, so a link out
+        of `memory/` is refused.
+      - The model gets a memory folder, not one file: topic files beside
+        `memory.md`, which stays the index the prompt carries.
+      - The libtapto folder tools (`read_file`, `search_files`) reach both,
+        so the model can search an overflow file instead of paging it.
+      - To decide: `@` as the mark. And `@tmp` per project (simpler) or per
+        session (clean-up is removing one folder).
+- [ ] **Tool overflow.** When a tool's output passes the limit (a large
+      `git status`, a build log), the whole output is written to a file in
+      `@tmp` and the model gets what fits, plus a line saying where the rest
+      is: "The output was cut. Lines 500-1132 are in `@tmp/sdjksf.txt`." It
+      reads or searches the rest, a range at a time, instead of having all of
+      it in its context.
+      - Needs `@tmp` (above). The label, not the absolute path: short, the
+        same in every session, and the user's home path stays out of the
+        conversation.
+      - Random names, so one output cannot be guessed or overwritten by
+        another.
+      - Removed when the session ends, or at the next start for a session
+        that crashed; `/clear` can go too. The files hold whatever the
+        command printed, secrets included, so they should not pile up.
+      - In the core, on every tool result, plugin tools' included (1.2.0).
+      - To decide: what the model gets inline, the first lines, the last, or
+        both. A build log's errors are usually at its end.
+- [ ] **`/resume` shows where you were.** Print the end of the old
+      conversation, about one screenful, so the user sees what was said
+      before carrying on, not only the pending prompt.
+- [ ] **[ro] commands.** Let a configured command run in, and take `%p`
+      paths from, a read-only `/add-folder` grant. Today only the built-ins
+      (`cat`, `ls`, ...) reach read-only grants: every other command's `cwd`
+      and `%p` resolve with write scope (`tools.cpp`, `subst_path` and the
+      `cwd` check), since nothing says the command only reads. A mark on the
+      command's definition would say so, at the user's or the administrator's
+      word.
+- [ ] **[protected] commands.** Run code the model generated (a test it
+      wrote, a script) in a sandbox instead of with the user's full rights.
+      Look at the AppContainer code in the test project.
+
+---
+
+# Unreleased: project memory, POSIX prompt editing (PR #1)
+
+Merged 20 Oct (`6163cd3`, from MatteO-Matic): a per-project memory file at
+`~/.tapto/projects/<project>/memory/memory.md`, whose first 50 lines ride in
+the system prompt; a line editor of our own for the prompt on Linux/macOS
+(arrows, history, bracketed paste); the user's input in yellow.
+
+Reviewed the same day. Fixed in `486523b` and `592fe14`:
+
+- [x] `run_command`'s cwd and `%p` could reach the memory file through a
+      writable grant covering `~`: the exception sat in
+      `refuse_protected_write`, which commands share. Now in
+      `resolve_for_editor` alone.
+- [x] The index was capped in lines, not bytes: now 8 KiB, with a note to
+      the model when it is cut.
+- [x] Pasted escape sequences and controls were echoed raw, and a pasted
+      `ESC[201~` plus newline submitted the prompt. Dropped and handled.
+- [x] 4-byte UTF-8 (emoji) split in the editor.
+- [x] CHANGELOG: the arrow-key entries had landed under the released 1.1.0.
+- [x] The prompt frames the memory as notes, not instructions, says what may
+      be written to it, and fences the index in `<memory-index>` markers the
+      file cannot fake.
+
+Open:
+
+- [ ] **Build and try the editor on Linux.** Nothing since `486523b` has been
+      compiled there (WSL here has no compiler); CI is the first build.
+- [ ] Prompt injection that outlives the session: the wording reduces it, it
+      does not close it. Structural options: a notice to the user whenever
+      the memory file is written, and the index carried in the first user
+      message instead of the system prompt.
+- [ ] A symlinked `memory.md` is followed (`is_memory_file` compares
+      canonically), so its target becomes writable by the editor. The model
+      cannot plant the link; refuse it anyway. Goes away with `@memory`
+      (Backlog, system labels).
+- [ ] Editor: the text after the cursor is not drawn (`reprint` stops at
+      `pos`), so moving left hides the rest of the line.
+- [ ] Editor: `char_cols` counts every non-ASCII character as 2 columns, so
+      åäö throw the wrapping off. Needs a `wcwidth`.
+- [ ] Editor: Ctrl-C at the prompt exits with echo and canonical mode off
+      (ISIG is on and there is no SIGINT handler to restore the terminal).
+- [ ] C4100 on Windows: `read_user_input`'s `prompt` is unused there.
+- [ ] Release: the next version is a minor one (memory is a feature).
+- [ ] Longer term the memory becomes a plugin, so an administrator can turn
+      it off (see 1.2.0).
+
+---
+
 # 1.1.0: the version in every request, commands without a shell
 
 Released 4 Oct as 1.1.0, not the planned 1.0.5: commands no longer running
@@ -102,10 +232,21 @@ interface ITaptoPluginUnload : public IBase {
     virtual SRESULT C_API Shutdown() = 0; // close connections, stop threads
 };
 
+// Optional, found by QueryInterface: prompt text that changes, asked for
+// each time the system prompt is rebuilt (Describe's `prompt` is fixed).
+interface ITaptoPluginPrompt : public IBase {
+    virtual SRESULT C_API Prompt(char** text_out) = 0;
+};
+
 // What a plugin may ask of the core.
 interface ITaptoHost : public IBase {
     virtual SRESULT C_API Log(const char* line) = 0;     // to the trace file
     virtual SRESULT C_API IsCancelled() = 0;             // ESC, for long calls
+    // Put a file in @tmp for the model to read (a downloaded attachment);
+    // `label_path_out` is "@tmp/<name>", for the plugin's result text.
+    virtual SRESULT C_API WriteTemp(const uint8_t* data, size_t size,
+                                    const char* name_hint,
+                                    char** label_path_out) = 0;
 };
 ```
 
@@ -131,6 +272,32 @@ round.
   can neither collide with another nor stand in for a core tool.
 - **Session:** loaded plugins and their mode are saved in `session.json`
   beside the granted folders, and `/resume` loads them again.
+
+## Paths, folders and overflow
+
+The core keeps the path rules, so no plugin resolves a path itself. Builds on
+the system labels in the Backlog (`@memory`, `@tmp`).
+
+- **Path parameters are marked in the schema:** `"x-tapto-path": "read"` or
+  `"write"`. The host resolves the label or path with the same rules as the
+  editor and refuses before `CallTool`, so the plugin only ever sees an
+  absolute path that has been checked. The same idea as `writes` on tools.
+- **A plugin's own folders:** `Describe` lists them
+  (`folders: [{name, mode}]`). The host makes
+  `~/.tapto/projects/<p>/plugins/<plugin>/<name>/` and gives each a system
+  label, `@<plugin>` or `@<plugin>-<name>` (the tool-name rule, for labels).
+  A plugin loaded ro gets its folders ro; `/remove-plugin` takes the labels
+  away.
+- **Overflow** is the core's: the host gets every tool's `result_out`, so a
+  long plugin result is cut and written to `@tmp` like any other. No plugin
+  does it.
+- **Files for the model:** `ITaptoHost::WriteTemp` writes into `@tmp` and
+  hands back the label path.
+- **Prompt text that changes:** `ITaptoPluginPrompt::Prompt`, asked at every
+  rebuild.
+
+The project memory needs nothing more than that: a `memory` plugin whose
+folder is `@memory`, rw, and whose `Prompt()` returns the rules and the index.
 
 ## Loading and trust
 
@@ -233,6 +400,10 @@ have:
 - [ ] Installer: `plugins\` and `scom.dll` in the MSI, the plugin signed in
       the same job; plugins as their own feature or their own MSI, to decide.
 - [ ] Open: tapto-jira as a thin host around the same plugin, or retired.
+- [ ] The project memory (PR #1, today in the core) as a plugin, so an
+      administrator can leave it out with `allowed-plugins`: `@memory` as the
+      plugin's declared folder and its index from `ITaptoPluginPrompt` (see
+      Paths, folders and overflow). Comes after the system labels.
 
 ---
 

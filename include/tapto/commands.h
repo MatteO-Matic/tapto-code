@@ -42,6 +42,18 @@ std::string command_policy_refusal(const std::string& name);
 // with the operator handed to the program as an argument.
 std::string command_line_refusal(const std::string& cmdline);
 
+// A command line that starts with "[ro] " reads only: it is the user's (or,
+// in policy, the administrator's) word that the command changes nothing, so
+// the model may run it in, and hand it %p paths from, a folder granted
+// read-only. Other commands may do anything, so they get only folders granted
+// read-write. The mark is not part of what runs; tapto-code cannot check it,
+// so a command that does write, marked [ro], can write in read-only folders.
+// .git and tapto-code's own folders stay refused either way.
+extern const char* const kReadOnlyMark; // "[ro]"
+bool command_reads_only(const std::string& cmdline);
+// The command line without its [ro] mark: what is run.
+std::string command_template(const std::string& cmdline);
+
 // The folders searched for a command's program before PATH, and the only
 // place a command line that needs a shell can live: as a script (.cmd/.bat on
 // Windows, a shell script elsewhere) that the command names.

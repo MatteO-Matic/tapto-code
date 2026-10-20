@@ -54,6 +54,9 @@ breaking changes and the patch number everything else.)
   its own notes rather than as instructions to follow.
   It is the only file in `~/.tapto` the model can change; open it to see or
   edit what it has remembered.
+- `command add --ro` (and `/add-command --ro`) adds a command that only
+  reads, which the model can then also run in, and point at files in, folders
+  you granted read-only with `/add-folder`.
 - `--resume` and `/resume` now show the end of the conversation you are
   picking up, about one screenful of your prompts and the model's answers,
   so you can see where you left off.

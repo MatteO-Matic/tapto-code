@@ -74,7 +74,40 @@ std::string command_policy_refusal(const std::string& name) {
     return "";
 }
 
-std::string command_line_refusal(const std::string& cmdline) {
+const char* const kReadOnlyMark = "[ro]";
+
+namespace {
+
+// Where the mark ends (the template's first character), or npos when the
+// command line has no mark: "[ro]" first, alone or before whitespace.
+std::size_t after_read_only_mark(const std::string& cmdline) {
+    const std::string mark = kReadOnlyMark;
+    const std::size_t start = cmdline.find_first_not_of(" \t");
+    if (start == std::string::npos || cmdline.compare(start, mark.size(), mark) != 0) {
+        return std::string::npos;
+    }
+    const std::size_t end = start + mark.size();
+    if (end < cmdline.size() && cmdline[end] != ' ' && cmdline[end] != '\t') return std::string::npos;
+    const std::size_t rest = cmdline.find_first_not_of(" \t", end);
+    return rest == std::string::npos ? cmdline.size() : rest;
+}
+
+} // namespace
+
+bool command_reads_only(const std::string& cmdline) {
+    return after_read_only_mark(cmdline) != std::string::npos;
+}
+
+std::string command_template(const std::string& cmdline) {
+    const std::size_t rest = after_read_only_mark(cmdline);
+    return rest == std::string::npos ? cmdline : cmdline.substr(rest);
+}
+
+std::string command_line_refusal(const std::string& cmdline_with_mark) {
+    const std::string cmdline = command_template(cmdline_with_mark);
+    if (cmdline.find_first_not_of(" \t") == std::string::npos) {
+        return "the command line names no program";
+    }
     // Only outside double quotes: a quoted "a|b" is one literal argument, the
     // way the template tokenizer reads it.
 #ifdef _WIN32

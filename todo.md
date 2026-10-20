@@ -77,13 +77,18 @@ moving the project memory into a plugin is listed there.
       `transcript()` in session.cpp reads the prompts and the model's text
       out of all three dialects' histories; `ui::print_transcript` sizes it
       to the terminal, counting what is printed after it.
-- [ ] **[ro] commands.** Let a configured command run in, and take `%p`
+- [x] **[ro] commands.** Let a configured command run in, and take `%p`
       paths from, a read-only `/add-folder` grant. Today only the built-ins
       (`cat`, `ls`, ...) reach read-only grants: every other command's `cwd`
       and `%p` resolve with write scope (`tools.cpp`, `subst_path` and the
       `cwd` check), since nothing says the command only reads. A mark on the
       command's definition would say so, at the user's or the administrator's
-      word.
+      word. For 1.2.0: a `[ro] ` prefix on the command line (`command add
+      --ro`, `/add-command --ro`, or by hand and in policy); `.git` and
+      `~/.tapto` stay refused to [ro] commands, since the mark is unchecked.
+      With `@tmp` (above), a [ro] command should reach it, e.g. to grep an
+      overflow file: that needs an exception for `@tmp` in the protected
+      check, for [ro] commands only.
 - [ ] **[protected] commands.** Run code the model generated (a test it
       wrote, a script) in a sandbox instead of with the user's full rights.
       Look at the AppContainer code in the test project.

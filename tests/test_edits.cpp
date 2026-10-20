@@ -9,6 +9,7 @@
 // model calls, through builtin_tools(), and assert on the exact bytes on disk —
 // which is the only place the difference shows up.
 
+#include "tapto/commands.h"
 #include "tapto/context.h"
 #include "tapto/tool_registry.h"
 #include "tapto/tools.h"
@@ -935,23 +936,90 @@ int main() {
             CHECK_TRUE(f.find(label + "/docs/note.txt") != std::string::npos);
         }
 
-        // A shell command's cwd may be a read-write grant and never a
-        // read-only one. The cwd is checked before the command is looked up,
-        // so an unknown name shows which check it got past.
+        // A command's cwd and %p paths may be in a read-write grant; in a
+        // read-only one only when the command is marked [ro], the user's word
+        // that it only reads. .git stays refused to a [ro] command too: the
+        // mark cannot be checked.
         {
             ToolExecutorFn run = find_run_command(ctx);
-            std::string c = run(ctx, json{{"name", "no-such-cmd"}, {"cwd", label}});
-            CHECK_TRUE(c.find("Unknown command") != std::string::npos); // rw: cwd accepted
+            const fs::path fake_home = fs::absolute(test_path("home"));
+            fs::create_directories(fake_home / ".tapto", ec);
+            write_raw((fake_home / ".tapto" / "commands").string(),
+#ifdef _WIN32
+                      "say = cmd /c echo hi\n"
+                      "rsay = [ro] cmd /c echo hi\n"
+                      "rpath = [ro]   cmd /c echo %p1\n"
+                      "wpath = cmd /c echo %p1\n"
+#else
+                      "say = echo hi\n"
+                      "rsay = [ro] echo hi\n"
+                      "rpath = [ro]   echo %p1\n"
+                      "wpath = echo %p1\n"
+#endif
+            );
+            const std::string home_var =
+#ifdef _WIN32
+                "USERPROFILE";
+#else
+                "HOME";
+#endif
+            const std::string saved = get_env(home_var);
+            set_env(home_var, fake_home.string());
+
+            const std::string note = label + "/docs/note.txt";
+            std::string c = run(ctx, json{{"name", "say"}, {"cwd", label}});
+            CHECK_TRUE(c.find("hi") != std::string::npos && c.rfind("ERROR:", 0) != 0); // rw
+            c = run(ctx, json{{"name", "wpath"}, {"args", {note}}});
+            CHECK_TRUE(c.find("note.txt") != std::string::npos && c.rfind("ERROR:", 0) != 0);
+
             CHECK_TRUE(granted.set_writable(label, false));
-            c = run(ctx, json{{"name", "no-such-cmd"}, {"cwd", label}});
+            c = run(ctx, json{{"name", "say"}, {"cwd", label}});
             CHECK_TRUE(c.rfind("ERROR:", 0) == 0 && c.find("read-only") != std::string::npos);
-            c = run(ctx, json{{"name", "no-such-cmd"}, {"cwd", outside.string()}});
+            CHECK_TRUE(c.find("[ro]") != std::string::npos); // the refusal names the way in
+            c = run(ctx, json{{"name", "say"}, {"cwd", outside.string()}});
             CHECK_TRUE(c.rfind("ERROR:", 0) == 0 && c.find("read-only") != std::string::npos);
-            // Built-ins still read there.
+            c = run(ctx, json{{"name", "wpath"}, {"args", {note}}});
+            CHECK_TRUE(c.rfind("ERROR:", 0) == 0 && c.find("read-only") != std::string::npos);
+
+            // [ro]: the cwd and the path are accepted, and the mark is not run.
+            c = run(ctx, json{{"name", "rsay"}, {"cwd", label}});
+            CHECK_TRUE(c.find("hi") != std::string::npos && c.rfind("ERROR:", 0) != 0);
+            CHECK_TRUE(c.find("[ro]") == std::string::npos);
+            c = run(ctx, json{{"name", "rpath"}, {"args", {note}}});
+            CHECK_TRUE(c.find("note.txt") != std::string::npos && c.rfind("ERROR:", 0) != 0);
+            c = run(ctx, json{{"name", "rsay"}, {"cwd", label + "/.git"}});
+            CHECK_TRUE(c.rfind("ERROR:", 0) == 0 && c.find("git directory") != std::string::npos);
+            c = run(ctx, json{{"name", "rpath"}, {"args", {label + "/.git/config"}}});
+            CHECK_TRUE(c.rfind("ERROR:", 0) == 0 && c.find("git directory") != std::string::npos);
+            // Outside every grant is outside for a [ro] command too.
+            c = run(ctx, json{{"name", "rpath"},
+                              {"args", {(fs::temp_directory_path() / "tapto-nowhere.txt").string()}}});
+            CHECK_TRUE(c.rfind("ERROR:", 0) == 0);
+
+            // Built-ins still read there; list_commands explains the mark.
             c = run(ctx, json{{"name", "ls"}, {"cwd", label}});
             CHECK_TRUE(c.find("docs") != std::string::npos);
+            ToolExecutorFn list = nullptr;
+            for (const auto& t : ctx.tools) if (t.name == "list_commands") list = t.executor;
+            CHECK_TRUE(list != nullptr);
+            c = list(ctx, json::object());
+            CHECK_TRUE(c.find("marked [ro]") != std::string::npos);
+            CHECK_TRUE(c.find("rsay: [ro] ") != std::string::npos);
+
             CHECK_TRUE(granted.set_writable(label, true));
+            set_env(home_var, saved);
+            fs::remove_all(fake_home, ec);
         }
+
+        // The mark: "[ro]" first and whole, before the program.
+        CHECK_TRUE(tapto::command_reads_only("[ro] grep x"));
+        CHECK_TRUE(tapto::command_reads_only("  [ro]\tgrep x"));
+        CHECK_TRUE(!tapto::command_reads_only("[ro]grep x"));
+        CHECK_TRUE(!tapto::command_reads_only("grep [ro] x"));
+        CHECK_TRUE(!tapto::command_reads_only("[RO] grep x"));
+        CHECK_EQ(tapto::command_template("[ro]   grep -n %1"), "grep -n %1");
+        CHECK_EQ(tapto::command_template("grep -n %1"), "grep -n %1");
+        CHECK_TRUE(!tapto::command_line_refusal("[ro]").empty()); // no program
 
         // The working directory as the set's home root, the way main sets it
         // up: read_file reads the project by a bare relative path (it used to

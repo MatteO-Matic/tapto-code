@@ -272,9 +272,9 @@ bool resolve_in_sandbox(const std::string& input, fs::path& out, std::string& er
 
     auto refuse_read_only = [&](const Folder& f) {
         error = "ERROR: '" + input + "' is in '" + f.label + "', which the user granted "
-                "read-only. Reading it is fine (read_file, view, cat); to change it or run "
-                "a command there, ask the user to grant the folder read-write with "
-                "/add-folder <path> rw.";
+                "read-only. Reading it is fine (read_file, view, cat, and the commands "
+                "list_commands marks [ro]); to change it or run another command there, ask "
+                "the user to grant the folder read-write with /add-folder <path> rw.";
         return false;
     };
 
@@ -1217,8 +1217,10 @@ size_t parse_placeholder(const std::string& s, size_t i, bool& is_path, bool& is
 // argv elements (never re-split), so no shell quoting is involved. The 'p'
 // (path) type additionally requires the value to resolve inside the sandbox and
 // substitutes the resolved absolute path. %* / %p* take all remaining values.
+// `reads_only` is a command marked [ro]: its paths may be in read-only grants.
 bool build_argv(const std::string& tpl, const std::vector<std::string>& args,
-                const fs::path& base, std::vector<std::string>& argv, std::string& error) {
+                const fs::path& base, std::vector<std::string>& argv, std::string& error,
+                bool reads_only = false) {
     // Highest positional index used; %* expands to the args beyond it.
     int max_idx = 0;
     bool has_star = false;
@@ -1248,11 +1250,15 @@ bool build_argv(const std::string& tpl, const std::vector<std::string>& args,
     // a copy's destination), so it is held to what the editor is held to: the
     // sandbox, and never a git directory. It resolves against `base`, the
     // directory the command will run in, so a relative value means the same
-    // file to the model, to the built-ins and to the process itself.
+    // file to the model, to the built-ins and to the process itself. A [ro]
+    // command only reads, so its paths may also be in read-only grants; the
+    // protected folders stay refused, since the mark is a promise tapto-code
+    // cannot check.
+    const Scope path_scope = reads_only ? Scope::Read : Scope::Write;
     auto subst_path = [&](const std::string& value, std::string& out) -> bool {
         fs::path resolved;
         std::string perr;
-        if (!resolve_in_sandbox(value, resolved, perr, base, Scope::Write)) { error = perr; return false; }
+        if (!resolve_in_sandbox(value, resolved, perr, base, path_scope)) { error = perr; return false; }
         if (refuse_protected_write(resolved, value, perr)) { error = perr; return false; }
         out = resolved.string();
         return true;
@@ -1826,7 +1832,8 @@ std::string execute_list_commands(Context& /*context*/, const json& /*in*/) {
                     : "\nNo commands are allow-listed: the organization's policy defines "
                       "none and allows no user commands.\n");
     } else {
-        out << "\nAllow-listed commands:\n";
+        out << "\nAllow-listed commands (those marked [ro] only read, so they may also "
+               "run in, and take paths from, folders granted read-only):\n";
         for (const auto& [name, cmdline] : cmds) {
             out << "- " << name << ": " << cmdline << "\n";
         }
@@ -1858,19 +1865,31 @@ std::string execute_run_command(Context& /*context*/, const json& in) {
         // the built-ins (they resolve their relative path against it) and the
         // allow-listed commands (they run with it as their working dir), so a
         // `cwd` means the same thing in either case. What "the tree" includes
-        // differs: a built-in only reads, so any granted folder will do; a
-        // command may do anything, so only one granted read-write.
+        // differs: a built-in only reads, and a command marked [ro] says it
+        // only reads, so any granted folder will do; another command may do
+        // anything, so only one granted read-write.
+        const bool builtin = is_builtin_command(name);
+        const auto cmds = merged_commands();
+        const auto it = cmds.find(name);
+        if (!builtin && it == cmds.end()) {
+            std::string msg = "ERROR: Unknown command '" + name +
+                              "'. Use list_commands to see what is available. Configured:";
+            if (cmds.empty()) msg += " (none)";
+            for (const auto& [n, c] : cmds) msg += " " + n;
+            return msg;
+        }
+        const bool reads_only = builtin || command_reads_only(it->second);
         fs::path base = sandbox_root();
         if (in.contains("cwd")) {
             if (!in["cwd"].is_string()) return "ERROR: 'cwd' must be a string.";
             const std::string raw = in["cwd"].get<std::string>();
             std::string err;
-            const bool builtin = is_builtin_command(name);
-            const Scope scope = builtin ? Scope::Read : Scope::Write;
+            const Scope scope = reads_only ? Scope::Read : Scope::Write;
             if (!resolve_in_sandbox(raw, base, err, fs::path(), scope)) return err;
             // A built-in only reads, so it may look inside a git directory or
-            // tapto-code's own folders; any other command run there could
-            // write whatever it likes.
+            // tapto-code's own folders. Any other command run there could
+            // write whatever it likes: a [ro] one too, since its mark is a
+            // promise tapto-code cannot check.
             if (!builtin && refuse_protected_write(base, raw, err)) return err;
             std::error_code ec;
             if (!fs::is_directory(base, ec)) {
@@ -1885,23 +1904,15 @@ std::string execute_run_command(Context& /*context*/, const json& in) {
         // every OS (and work on pure Windows where wc/head/etc. are absent).
         // Their target path resolves against `base` (they also accept a
         // relative-from-root path directly).
-        if (is_builtin_command(name)) return run_builtin_command(name, args, base);
+        if (builtin) return run_builtin_command(name, args, base);
 
-        auto cmds = merged_commands();
-        auto it = cmds.find(name);
-        if (it == cmds.end()) {
-            std::string msg = "ERROR: Unknown command '" + name +
-                              "'. Use list_commands to see what is available. Configured:";
-            if (cmds.empty()) msg += " (none)";
-            for (const auto& [n, c] : cmds) msg += " " + n;
-            return msg;
-        }
-        const std::string& tpl = it->second;
+        // What runs is the command line without its [ro] mark.
+        const std::string tpl = command_template(it->second);
 
         // A command defined before shell syntax was refused (or written into a
         // store by hand) says so, rather than handing `|` to the program.
-        if (std::string why = command_line_refusal(tpl); !why.empty()) {
-            return "ERROR: the command '" + name + "' (" + tpl + ") cannot run: " + why +
+        if (std::string why = command_line_refusal(it->second); !why.empty()) {
+            return "ERROR: the command '" + name + "' (" + it->second + ") cannot run: " + why +
                    ". Only the user or an administrator can change that; tell the user.";
         }
 
@@ -1912,7 +1923,7 @@ std::string execute_run_command(Context& /*context*/, const json& in) {
         std::vector<std::string> argv;
         {
             std::string err;
-            if (!build_argv(tpl, args, base, argv, err)) return err;
+            if (!build_argv(tpl, args, base, argv, err, reads_only)) return err;
         }
         int exit_code = 0;
         bool started = false;

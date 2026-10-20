@@ -622,6 +622,21 @@ in, so it names the same file to the agent and to the process.
 tapto-code command add fmt clang-format -i %p1   # only formats files in-tree
 ```
 
+**Read-only commands (`--ro`):** a command may do anything, so its `cwd` and
+`%p` paths may be in the working directory and in folders granted read-write
+(`/add-folder <path> rw`), never in ones granted read-only. A command that only
+reads can say so with `--ro`, and then it may use read-only folders too:
+
+```sh
+tapto-code command add --ro search grep -rn -- %1 %p*
+```
+
+This stores the command line with a `[ro]` mark in front (`search = [ro] grep
+-rn -- %1 %p*`), which is also how to write it by hand or in policy. The mark is
+your word, not something tapto-code can check: a command that does write,
+marked `--ro`, can write in read-only folders. `.git` and tapto-code's own
+folders stay refused to every command either way.
+
 ## Other commands
 
 ```sh

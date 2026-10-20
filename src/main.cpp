@@ -90,7 +90,10 @@ const char* kUsage =
     "  list                List config values\n"
     "\n"
     "Command commands (allow-listed commands the chat agent may run):\n"
-    "  command add <name> <command...>   Allow-list a command (default scope: local)\n"
+    "  command add [--ro] <name> <command...>\n"
+    "                                    Allow-list a command (default scope: local);\n"
+    "                                    --ro: it only reads, so it may also use\n"
+    "                                    folders granted read-only\n"
     "  command remove <name>             Remove a command\n"
     "  command list                      List configured commands\n"
     "\n"
@@ -376,7 +379,7 @@ int cmd_version() {
 // Handles the `command` subcommand (add / remove / list). `rest` is the raw
 // argument list after `command`, taken verbatim so `add` can capture a command
 // line containing tokens like --build or --config.
-int cmd_command(std::optional<Level> level, const std::vector<std::string>& rest) {
+int cmd_command(std::optional<Level> level, std::vector<std::string> rest) {
     if (rest.empty()) {
         ui::print_usage("usage: tapto-code [--scope] command <add|remove|list> ...\n");
         return 2;
@@ -384,8 +387,14 @@ int cmd_command(std::optional<Level> level, const std::vector<std::string>& rest
     const std::string& sub = rest[0];
 
     if (sub == "add") {
+        // --ro marks the command [ro]: it only reads (tapto/commands.h).
+        bool reads_only = false;
+        if (rest.size() > 1 && rest[1] == "--ro") {
+            reads_only = true;
+            rest.erase(rest.begin() + 1);
+        }
         if (rest.size() < 3) {
-            ui::print_error("'command add' requires <name> <command...>");
+            ui::print_error("'command add' requires [--ro] <name> <command...>");
             return 2;
         }
         const std::string& name = rest[1];
@@ -402,6 +411,7 @@ int cmd_command(std::optional<Level> level, const std::vector<std::string>& rest
             if (i > 2) cmdline += ' ';
             cmdline += rest[i];
         }
+        if (reads_only && !command_reads_only(cmdline)) cmdline = std::string(kReadOnlyMark) + " " + cmdline;
         Level lvl = level.value_or(Level::Local);
         if (lvl == Level::Policy) {
             ui::print_error("the policy scope is read-only; it is set by your organization in " +
@@ -1978,11 +1988,14 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
             std::istringstream iss(line);
             std::string slash, name;
             iss >> slash >> name;
+            // --ro marks the command [ro]: it only reads (tapto/commands.h).
+            const bool reads_only = name == "--ro";
+            if (reads_only) iss >> name;
             std::string remainder;
             std::getline(iss, remainder);
             size_t begin = remainder.find_first_not_of(" \t");
-            if (name.empty() || begin == std::string::npos) {
-                ui::print_line("usage: /add-command <name> <command...>");
+            if (name.empty() || name == "--ro" || begin == std::string::npos) {
+                ui::print_line("usage: /add-command [--ro] <name> <command...>");
                 continue;
             }
             if (name.find('=') != std::string::npos) {
@@ -1998,6 +2011,7 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
                 continue;
             }
             std::string cmdline = remainder.substr(begin);
+            if (reads_only && !command_reads_only(cmdline)) cmdline = std::string(kReadOnlyMark) + " " + cmdline;
             if (std::string why = command_line_refusal(cmdline); !why.empty()) {
                 ui::print_line("error: " + why);
                 continue;

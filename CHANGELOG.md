@@ -50,7 +50,8 @@ breaking changes and the patch number everything else.)
 
 - The model now keeps notes per project in
   `~/.tapto/projects/<project>/memory/memory.md`, and the first 50 lines of
-  that file are added to the instructions of every session in that folder.
+  that file are shown to it at the start of every session in that folder, as
+  its own notes rather than as instructions to follow.
   It is the only file in `~/.tapto` the model can change; open it to see or
   edit what it has remembered.
 

@@ -724,6 +724,23 @@ std::vector<std::string>& posix_history() {
     return history;
 }
 
+// Remove the C1 control characters (U+0080 to U+009F, bytes C2 80 to C2 9F
+// in UTF-8) from `s`. Some terminals act on them the way they act on an ESC
+// sequence, so text the editor echoes must not carry them.
+void drop_c1_controls(std::string& s) {
+    std::string kept;
+    kept.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (static_cast<unsigned char>(s[i]) == 0xC2 && i + 1 < s.size() &&
+            static_cast<unsigned char>(s[i + 1]) < 0xA0) {
+            ++i; // the control and its lead byte both go
+            continue;
+        }
+        kept += s[i];
+    }
+    s = std::move(kept);
+}
+
 // Read one line from a terminal, with the program doing its own line
 // editing (echo off). The arrow keys' ESC sequences are consumed as cursor
 // moves and history recall instead of being recorded as "[A" and friends.
@@ -756,8 +773,8 @@ bool posix_read_line(const std::string& prompt_text, std::string& out) {
         unsigned char b = static_cast<unsigned char>(s[i]);
         size_t adv = 1;
         if ((b & 0xE0) == 0xC0) adv = 2;
-        else if ((b & 0xE0) == 0xE0) adv = 3;
-        else if ((b & 0xF0) == 0xF0) adv = 4;
+        else if ((b & 0xF0) == 0xE0) adv = 3;
+        else if ((b & 0xF8) == 0xF0) adv = 4;
         if (adv > s.size() - i) adv = s.size() - i;
         return i + adv;
     };
@@ -882,6 +899,16 @@ bool posix_read_line(const std::string& prompt_text, std::string& out) {
         }
     };
 
+    // True when more input is already there, without waiting for any.
+    auto input_ready = [&]() -> bool {
+        if (!pend.empty()) return true;
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(STDIN_FILENO, &fds);
+        struct timeval tv { 0, 0 };
+        return select(STDIN_FILENO + 1, &fds, nullptr, nullptr, &tv) > 0;
+    };
+
     // Move the cursor to a character boundary (for insert/backspace).
     auto del_char_at = [&](size_t at) {
         size_t start = prev_char_start(at);
@@ -925,17 +952,21 @@ bool posix_read_line(const std::string& prompt_text, std::string& out) {
                 }
             }
             if (in_paste) {
-                // A pasted sequence stays in the text; the end marker closes
-                // the paste.
-                if (seq == "\x1b[201~") {
+                // The end marker closes the paste. A real one is the last
+                // thing the terminal sends for it: one with more input right
+                // behind it came from the pasted text itself, written to end
+                // the paste early and type the rest (Enter included) as if
+                // from the keyboard. That one is dropped and the paste goes on.
+                if (seq == "\x1b[201~" && !input_ready()) {
+                    drop_c1_controls(paste);
                     line.insert(pos, paste);
                     pos += paste.size();
                     paste.clear();
                     in_paste = false;
                     reprint();
-                } else {
-                    paste += seq;
                 }
+                // Any other sequence in a paste is dropped: the editor echoes
+                // the line, and echoed, it would drive the terminal.
                 continue;
             }
             if (seq == "\x1b[200~") { in_paste = true; continue; }
@@ -972,9 +1003,10 @@ bool posix_read_line(const std::string& prompt_text, std::string& out) {
             continue;
         }
         if (in_paste) {
-            // The paste arrives unedited: newlines and all.
-            if (b == '\r') paste += '\n';
-            else paste += static_cast<char>(b);
+            // The paste arrives unedited, newlines and tabs and all, but no
+            // other control character: the editor echoes it.
+            if (b == '\r' || b == '\n') paste += '\n';
+            else if (b == '\t' || (b >= 0x20 && b != 0x7f)) paste += static_cast<char>(b);
             continue;
         }
         if (b == '\n' || b == '\r') {
@@ -1009,13 +1041,15 @@ bool posix_read_line(const std::string& prompt_text, std::string& out) {
         int want = 0;
         unsigned char ub = static_cast<unsigned char>(b);
         if ((ub & 0xE0) == 0xC0) want = 2;
-        else if ((ub & 0xE0) == 0xE0) want = 3;
-        else if ((ub & 0xF0) == 0xF0) want = 4;
+        else if ((ub & 0xF0) == 0xE0) want = 3;
+        else if ((ub & 0xF8) == 0xF0) want = 4;
         for (int i = 1; i < want; ++i) {
             int c = read_byte(false);
             if (c < 0) break;
             ch += static_cast<char>(c);
         }
+        drop_c1_controls(ch);
+        if (ch.empty()) continue;
         line.insert(pos, ch);
         pos += ch.size();
         reprint();

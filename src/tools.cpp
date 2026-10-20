@@ -210,9 +210,8 @@ const Folder* granted_owner(const fs::path& resolved, bool writable_only) {
 //   Memory      the project's memory file (tapto/memory.h), a single file
 //               outside every directory above. It is the one write the editor
 //               makes the model's memory; nothing else reaches it -- no other
-//               tool names it, no command's cwd or %p can, and the protected
-//               checks still refuse it, since ~/.tapto is one of tapto-code's
-//               own folders.
+//               tool names it, and no command's cwd or %p can, since the
+//               protected checks refuse it as part of ~/.tapto.
 enum class Scope { Read, Write, WorkingDir, Memory };
 
 // Resolve `input` (absolute, or relative to `base`) and confirm it stays
@@ -455,12 +454,11 @@ bool in_tapto_dir(const fs::path& resolved, const std::string& input) {
 // Refuse a path that a write must not touch. Shared by the editor and by
 // run_command, so a command cannot reach what the editor is refused.
 //
-// The project's memory file is the one exception: it sits in ~/.tapto, which
-// this function's second check would otherwise refuse. It is checked first,
-// so the editor alone reaches it -- run_command, which calls this same
-// function for its cwd and %p paths, still cannot.
+// The project's memory file sits in ~/.tapto and is refused here like the
+// rest of it: the editor's exception lives in resolve_for_editor alone, so a
+// command's cwd or %p path never reaches the file, not even through a writable
+// grant that covers the home folder.
 bool refuse_protected_write(const fs::path& resolved, const std::string& input, std::string& error) {
-    if (is_memory_file(resolved)) return false;
     if (in_git_dir(resolved, input)) {
         error = "ERROR: '" + input + "' is inside a repository's git directory, which "
                 "tapto-code never writes to. Use an allow-listed git command instead.";
@@ -486,11 +484,11 @@ bool resolve_for_write(const std::string& input, fs::path& out, std::string& err
 // except that the editor -- and nothing else -- may name the project's memory
 // file. Scope::Memory makes the memory check come first, so a memory path
 // never falls through to the sandbox's refusal (and the refusal message about
-// the working directory is never the one a memory edit gets).
+// the working directory is never the one a memory edit gets). The memory file
+// skips refuse_protected_write, which refuses all of ~/.tapto: this is the one
+// place that exception is made.
 bool resolve_for_editor(const std::string& input, fs::path& out, std::string& error) {
-    if (resolve_in_sandbox(input, out, error, fs::path(), Scope::Memory)) {
-        return !refuse_protected_write(out, input, error);
-    }
+    if (resolve_in_sandbox(input, out, error, fs::path(), Scope::Memory)) return true;
     return resolve_for_write(input, out, error);
 }
 

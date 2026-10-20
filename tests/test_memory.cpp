@@ -301,6 +301,25 @@ int main() {
         const std::string r3 = run(ctx, json{{"name", "tapto-memory"}, {"args", {memory.string()}}});
         CHECK_TRUE(r3.rfind("ERROR:", 0) == 0 && r3.find("outside the working directory") != std::string::npos);
 
+        // A writable grant that covers the home folder puts the file inside
+        // the sandbox, and the commands are still refused: the file is in
+        // tapto-code's own folders, and the memory exception is the editor's.
+        {
+            tapto::FolderSet granted;
+            CHECK_EQ(granted.add(fake_home.string(), nullptr, /*writable=*/true), "");
+            tapto::set_granted_folders(&granted);
+            const std::string g = run(ctx, json{{"name", "tapto-memory"}, {"args", {memory.string()}}});
+            CHECK_TRUE(g.rfind("ERROR:", 0) == 0 && g.find("own folders") != std::string::npos);
+            const std::string g2 = run(ctx, json{{"name", "tapto-memory"}, {"cwd", memory.parent_path().string()}});
+            CHECK_TRUE(g2.rfind("ERROR:", 0) == 0 && g2.find("own folders") != std::string::npos);
+            // The editor still writes it under the grant.
+            const std::string w = edit(ctx, json{{"command", "str_replace"}, {"path", memory.string()},
+                                                 {"old_str", "- one"}, {"new_str", "- two"}});
+            CHECK_TRUE(w.rfind("ERROR:", 0) != 0);
+            CHECK_EQ(read_raw(memory), "# Memory\n\n- two\n");
+            tapto::set_granted_folders(nullptr);
+        }
+
         // The editor still reads it while all of that is refused.
         const std::string v = edit(ctx, json{{"command", "view"}, {"path", memory.string()}});
         CHECK_TRUE(v.find("1|# Memory") != std::string::npos);
@@ -334,6 +353,24 @@ int main() {
         CHECK_TRUE(prompt.find("\nline 49") != std::string::npos);
         CHECK_TRUE(prompt.find("line 50") == std::string::npos);
         CHECK_TRUE(prompt.find("line 51") == std::string::npos);
+
+        // The index is capped in bytes too: one huge line is cut at the
+        // limit, and a note says so.
+        write_raw(memory, "# Memory\n" + std::string(100000, 'x') + "\n- after\n");
+        const std::string big = tapto::memory_head();
+        CHECK_TRUE(big.size() < tapto::kMemoryIndexBytes + 200);
+        CHECK_TRUE(big.find("[The index stops here") != std::string::npos);
+        CHECK_TRUE(big.find("- after") == std::string::npos);
+
+        // A cut that falls past the 50th line takes nothing from the index,
+        // so there is no note.
+        std::string many = "# Memory\n";
+        for (int i = 1; i <= 60; ++i) many += "line " + std::to_string(i) + "\n";
+        many += std::string(100000, 'y') + "\n";
+        write_raw(memory, many);
+        const std::string fits = tapto::memory_head();
+        CHECK_TRUE(fits.find("[The index stops here") == std::string::npos);
+        CHECK_TRUE(fits.find("\nline 49") != std::string::npos);
     }
 
     // --- is_memory_file: the exact path, a resolving spelling, nothing else --

@@ -4,7 +4,6 @@
 #include "tapto/memory.h"
 
 #include <fstream>
-#include <sstream>
 #include <system_error>
 #include <vector>
 
@@ -54,20 +53,40 @@ bool is_memory_file(const fs::path& path) {
 std::string memory_head(std::size_t max_lines) {
     std::ifstream in(memory_path(), std::ios::binary);
     if (!in) return "";
-    std::ostringstream ss;
-    ss << in.rdbuf();
+    // Never more than the byte limit (and one byte to tell that there was
+    // more): the file can be any size, the index cannot.
+    std::string bytes(kMemoryIndexBytes + 1, '\0');
+    in.read(&bytes[0], static_cast<std::streamsize>(bytes.size()));
+    bytes.resize(static_cast<std::size_t>(in.gcount()));
+    const bool clipped = bytes.size() > kMemoryIndexBytes;
+    if (clipped) {
+        // Cut at the limit, and back to the start of a UTF-8 character, so
+        // the prompt never ends in half of one.
+        bytes.resize(kMemoryIndexBytes);
+        while (!bytes.empty() && (static_cast<unsigned char>(bytes.back()) & 0xC0) == 0x80)
+            bytes.pop_back();
+        if (!bytes.empty() && static_cast<unsigned char>(bytes.back()) >= 0xC0) bytes.pop_back();
+    }
 
     // content_lines, not split_lines: a trailing newline must not count as a
     // line, or the prompt's "first 50 lines" and the editor's view [1, 50]
     // would disagree about what the file's 50th line is.
-    std::vector<std::string> lines = content_lines(ss.str());
+    std::vector<std::string> lines = content_lines(bytes);
     if (lines.empty()) return "";
+    // The cut matters only when it falls inside the index: past its last
+    // line, it took nothing the index would have carried.
+    const bool cut = clipped && lines.size() <= max_lines;
     if (max_lines < lines.size()) lines.resize(max_lines);
 
     std::string out;
     for (std::size_t i = 0; i < lines.size(); ++i) {
         if (i) out += '\n';
         out += lines[i];
+    }
+    if (cut) {
+        out += "\n[The index stops here: its first " + std::to_string(max_lines) +
+               " lines run past " + std::to_string(kMemoryIndexBytes) +
+               " bytes. Shorten them.]";
     }
     return out;
 }

@@ -32,6 +32,11 @@ namespace tapto {
 // the model reads the rest of the file by name with its editor tool.
 constexpr std::size_t kMemoryIndexLines = 50;
 
+// And at most this many bytes of them: the index rides along with every
+// request, so a few very long lines must not make every request huge. An
+// index cut short by this ends in a note that says so.
+constexpr std::size_t kMemoryIndexBytes = 8192;
+
 // The file itself. The project directory the working directory encodes, so
 // each project holds its own memory, the way it holds its local config and
 // its saved conversation. Empty when the working directory cannot be read.
@@ -44,7 +49,8 @@ bool is_memory_file(const std::filesystem::path& path);
 
 // The first `max_lines` lines of the memory file, joined with '\n' (a CR at a
 // line's end is dropped). An absent or unreadable file gives an empty string;
-// a file shorter than `max_lines` gives what it has. The index, when the
+// a file shorter than `max_lines` gives what it has. Lines past the first
+// kMemoryIndexBytes bytes are left out, and a note says so. The index, when the
 // file is still empty, is what the prompt tells the model to keep in place.
 std::string memory_head(std::size_t max_lines = kMemoryIndexLines);
 

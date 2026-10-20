@@ -4,6 +4,7 @@
 #include "tapto/commands.h"
 #include "tapto/config.h"
 #include "tapto/fstools.h"
+#include "tapto/memory.h"
 #include "tapto/paths.h"
 #include "tapto/policy.h"
 #include "tapto/prompt.h"
@@ -38,6 +39,8 @@
 #include <termios.h>
 #include <unistd.h>
 #include <sys/select.h>
+#include <sys/ioctl.h>
+#include <cerrno>
 #endif
 
 using namespace tapto;
@@ -59,6 +62,15 @@ void enable_console_features() {
     }
 #endif
 }
+
+// The color the user's own prompt is echoed in. It is the only input this
+// program colors, so a hue the app uses for user-facing notices (yellow) keeps
+// the lines the user typed standing out from the model's plain markdown in the
+// scrollback. Painted by the chat loop (the > marker), by the POSIX editor's
+// echo, and inherited by the Windows console's echo; a reset follows every
+// read so it never leaks into the model's reply or the status line.
+constexpr const char* kPromptColor = "\x1b[33m";
+constexpr const char* kPromptReset = "\x1b[0m";
 
 const char* kUsage =
     "tapto-code - a small cross-platform CLI\n"
@@ -645,6 +657,373 @@ bool win_char_input_pending(HANDLE in) {
 }
 #endif
 
+// RAII terminal guard: unbuffered, no-echo stdin.
+//
+// Used in two places, both of which do their own input handling after a
+// select() and therefore need no line discipline at all:
+//
+//  * The ESC interrupt poll during a chat() call: the read must not wait for
+//    a full line, so canonical (line) mode is disabled.
+//  * Editing a prompt line (posix_read_line): the program does the echo and
+//    line editing itself (arrows, history, pastes), so echo and canonical
+//    mode are disabled there as well. ISIG stays on, so Ctrl-C still raises
+//    SIGINT from the prompt exactly as before.
+// ---------------------------------------------------------------------------
+struct RawTerminal {
+    RawTerminal() {
+#ifndef _WIN32
+        if (tcgetattr(STDIN_FILENO, &m_saved) != 0) return;
+        m_raw = m_saved;
+        m_raw.c_lflag &= ~(ICANON | ECHO);
+        m_raw.c_cc[VMIN]  = 0;
+        m_raw.c_cc[VTIME] = 0;
+        if (tcsetattr(STDIN_FILENO, TCSANOW, &m_raw) == 0)
+            m_active = true;
+#else
+        (void)this; // _kbhit works in cooked mode; nothing to do
+#endif
+    }
+    ~RawTerminal() {
+#ifndef _WIN32
+        if (m_active) tcsetattr(STDIN_FILENO, TCSANOW, &m_saved);
+#else
+        (void)this;
+#endif
+    }
+    RawTerminal(const RawTerminal&) = delete;
+    RawTerminal& operator=(const RawTerminal&) = delete;
+#ifndef _WIN32
+    termios m_saved{};
+    termios m_raw{};
+    bool    m_active{false};
+#else
+    int m_dummy;
+#endif
+};
+
+// ---------------------------------------------------------------------------
+// Reading an interactive prompt line on a POSIX TTY, with the program doing
+// its own line editing (echo off).
+//
+// A terminal sends the arrow keys as ESC sequences (ESC [ A / D / B / C for
+// up / left / down / right), so reading the line the generic way (getline)
+// records them as the characters "[A[D[B[C" and sends them on to the model.
+// This editor consumes those sequences as cursor moves and history recall
+// instead, and echoes the line itself as it is typed. Multi-line pastes are
+// captured through the bracketed-paste markers (ESC [ 200~ ... ESC [ 201~)
+// that most terminals send, and land in the line as newlines.
+//
+// Returns false on EOF, or when stdin is not a terminal (read_user_input
+// then falls back to getline).
+// ---------------------------------------------------------------------------
+#ifndef _WIN32
+// History of the previous submissions, oldest first (back() is newest).
+// Session-scoped on purpose: prompts from a previous session are noise here.
+std::vector<std::string>& posix_history() {
+    static std::vector<std::string> history;
+    return history;
+}
+
+// Read one line from a terminal, with the program doing its own line
+// editing (echo off). The arrow keys' ESC sequences are consumed as cursor
+// moves and history recall instead of being recorded as "[A" and friends.
+// Bracketed pastes land in the line with their newlines. Returns false on
+// EOF, or when stdin is not a terminal.
+bool posix_read_line(const std::string& prompt_text, std::string& out) {
+    if (!isatty(STDIN_FILENO)) return false; // not a terminal; caller uses getline
+    RawTerminal raw; // unbuffered, no echo; ISIG stays on, so Ctrl-C still
+                     // raises SIGINT exactly as it did before this existed
+
+    std::vector<std::string>& history = posix_history();
+    size_t hist_pos = 0; // 0: a fresh line; 1: newest ... history.size(): oldest
+
+    std::string line; // the line being edited
+    size_t pos = 0;   // cursor, in bytes inside `line`, always a char boundary
+    std::string paste;
+    bool in_paste = false;
+
+    // Columns the echo can use before it has to wrap.
+    int term_cols = 80;
+    {
+        struct winsize ws;
+        if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
+            term_cols = ws.ws_col;
+    }
+
+    // Advance one UTF-8 character (bytes) from index i.
+    auto next_char = [&](const std::string& s, size_t i) -> size_t {
+        if (i >= s.size()) return i;
+        unsigned char b = static_cast<unsigned char>(s[i]);
+        size_t adv = 1;
+        if ((b & 0xE0) == 0xC0) adv = 2;
+        else if ((b & 0xE0) == 0xE0) adv = 3;
+        else if ((b & 0xF0) == 0xF0) adv = 4;
+        if (adv > s.size() - i) adv = s.size() - i;
+        return i + adv;
+    };
+    // Display width (columns) of the character at i: a coarse bound, good
+    // enough to avoid wrapping inside a visible character.
+    auto char_cols = [&](const std::string& s, size_t i) -> size_t {
+        if (i >= s.size()) return 0;
+        unsigned char b = static_cast<unsigned char>(s[i]);
+        return (b >= 0xC0) ? 2 : 1;
+    };
+
+    // Start of the UTF-8 character that ends at `p` (a cursor position).
+    auto prev_char_start = [&](size_t p) -> size_t {
+        size_t start = p;
+        while (start > 0) {
+            size_t prev = start - 1;
+            size_t adv = next_char(line, prev) - prev;
+            if (prev + adv == start) return prev;
+            --start;
+        }
+        return 0;
+    };
+
+    // Screen lines the echo occupies after the last reprint, so a reprint can
+    // move back to the top of the block before clearing it.
+    size_t printed_lines = 1;
+    // The chat loop shows the cursor at the prompt (\x1b[?25h) and hides it
+    // while the model works, so a reprint must leave it visible: an erase
+    // that leaves the cursor where it hid would hide it again. Starts shown
+    // because the prompt is printed with the cursor visible.
+    static bool cursor_shown = true;
+    // Redraw the prompt and the line, cursor at the edit position. The
+    // current line and everything below it (wrapped remainder, blank screen)
+    // is cleared first, and every wrapped line is cleared before its new
+    // content, so no stale character can survive a redraw.
+    auto reprint = [&]() {
+        std::string up;
+        up.reserve(3 * printed_lines);
+        for (size_t k = 1; k < printed_lines; ++k) up += "\x1b[1A";
+        std::cout << up << "\r\x1b[J";
+        if (!cursor_shown) {
+            std::cout << "\x1b[?25h";
+            cursor_shown = true;
+        }
+        size_t used = 0; // columns used on the current line
+        size_t wraps = 0;
+        auto start_line = [&]() {
+            // The marker and the typed text are echoed in the prompt color,
+            // so what the user writes stands out from the model's plain
+            // markdown. Width bookkeeping below uses the plain prompt's byte
+            // length, so the escapes don't skew the wrap math. Each segment is
+            // color + reset, so a reprint can break out early (cursor before
+            // the line's end) without leaving the terminal colored.
+            std::cout << kPromptColor << prompt_text << kPromptReset;
+            used = prompt_text.size();
+        };
+        start_line();
+        size_t i = 0;
+        while (i < line.size()) {
+            size_t adv = next_char(line, i) - i;
+            if (line[i] == '\n') { // a pasted line break: next physical line,
+                // plain (no prompt)
+                std::cout << "\n";
+                used = 0;
+                ++wraps;
+                i += adv;
+                if (i >= pos) break; // the rest stays cleared
+                continue;
+            }
+            size_t w = char_cols(line, i);
+            if (used + w > static_cast<size_t>(term_cols)) {
+                // The line is full: wrap to the next physical line. It is
+                // already empty (cleared at the top), so just move down and
+                // start the prompt again.
+                std::cout << "\n";
+                start_line();
+                ++wraps;
+            }
+            std::cout << kPromptColor << line.substr(i, adv) << kPromptReset;
+            used += w;
+            i += adv;
+            if (i >= pos) break; // the rest stays cleared
+        }
+        printed_lines = wraps + 1;
+        std::cout << std::flush;
+    };
+
+    // One byte. `block`: wait for one; otherwise peek with a short timeout —
+    // the bytes of a keystroke or a paste arrive in a burst, so the timeout
+    // separates one keystroke from the next without ever blocking on input
+    // that is not coming. A read pulls the whole burst that is ready and keeps
+    // the tail in `pend`; `pend` is static so bytes that overran a submitted
+    // line are not lost — they are still the user's input for the next prompt.
+    static std::vector<unsigned char> pend;
+    auto read_byte = [&](bool block) -> int {
+        if (!pend.empty()) {
+            unsigned char b = pend.front();
+            pend.erase(pend.begin());
+            return b;
+        }
+        for (;;) {
+            fd_set fds;
+            FD_ZERO(&fds);
+            FD_SET(STDIN_FILENO, &fds);
+            struct timeval tv { 0, block ? 0 : 20000 };
+            timeval* tvp = block ? nullptr : &tv;
+            int r = select(STDIN_FILENO + 1, &fds, nullptr, nullptr, tvp);
+            if (r < 0) {
+                if (errno == EINTR) continue; // interrupted; not EOF
+                return -1;
+            }
+            if (r == 0 && !block) return -1; // peek timed out: no byte ready
+            unsigned char buf[64];
+            ssize_t n = read(STDIN_FILENO, buf, sizeof(buf));
+            if (n == -1) {
+                if (errno == EINTR) continue; // interrupted; try again
+                return -1;
+            }
+            if (n == 0) return -1; // EOF
+            for (ssize_t i = 1; i < n; ++i) pend.push_back(buf[i]);
+            return buf[0];
+        }
+    };
+
+    // Move the cursor to a character boundary (for insert/backspace).
+    auto del_char_at = [&](size_t at) {
+        size_t start = prev_char_start(at);
+        line.erase(start, at - start);
+        pos = start;
+    };
+
+    // Submit the current line: into the history if it is new, out to the
+    // caller. `hist_pos` resets with it: the line being edited is no longer
+    // a recall from history. The next prompt block comes on a fresh screen
+    // line (the model's reply prints in between), so the reprint bookkeeping
+    // starts over: the next redraw must not reach back up into this one.
+    auto submit = [&]() -> bool {
+        if (!line.empty() && (history.empty() || history.back() != line))
+            history.push_back(line);
+        hist_pos = 0;
+        printed_lines = 1;
+        out = std::move(line);
+        return true;
+    };
+
+    for (;;) {
+        // The terminal delivers the first byte of a character or sequence
+        // when it is pressed, so a blocking read waits for exactly that.
+        int b = read_byte(true);
+        if (b < 0) break; // EOF
+        if (b == 0x1B) {
+            // An ESC: a bare interrupt key, or the start of a sequence. The
+            // follow-up bytes, if any, arrive in the same burst.
+            std::string seq(1, static_cast<char>(b));
+            int c = read_byte(false);
+            if (c >= 0) {
+                seq += static_cast<char>(c);
+                if (c == '[' || c == 'O') {
+                    for (;;) {
+                        int d = read_byte(false);
+                        if (d < 0) break;
+                        seq += static_cast<char>(d);
+                        if (c == 'O' || (d >= 0x40 && d <= 0x7E)) break; // final byte
+                    }
+                }
+            }
+            if (in_paste) {
+                // A pasted sequence stays in the text; the end marker closes
+                // the paste.
+                if (seq == "\x1b[201~") {
+                    line.insert(pos, paste);
+                    pos += paste.size();
+                    paste.clear();
+                    in_paste = false;
+                    reprint();
+                } else {
+                    paste += seq;
+                }
+                continue;
+            }
+            if (seq == "\x1b[200~") { in_paste = true; continue; }
+            // Editing keys. None of them may leak into the line.
+            if (seq == "\x1b[A") { // up: recall the older entry
+                if (hist_pos < history.size()) {
+                    size_t np = hist_pos + 1;
+                    hist_pos = np;
+                    line = history[history.size() - np];
+                    pos = line.size();
+                    reprint();
+                }
+            } else if (seq == "\x1b[B") { // down: the newer entry (0: fresh)
+                if (hist_pos > 0) {
+                    size_t np = hist_pos - 1;
+                    hist_pos = np;
+                    line = np ? history[history.size() - np] : "";
+                    pos = line.size();
+                    reprint();
+                }
+            } else if (seq == "\x1b[D" || seq == "\x1b[1D") { // left
+                if (pos > 0) { pos = prev_char_start(pos); reprint(); }
+            } else if (seq == "\x1b[C" || seq == "\x1b[1C") { // right
+                if (pos < line.size()) { pos = next_char(line, pos); reprint(); }
+            } else if (seq == "\x1b[H" || seq == "\x1b[1H") { // home
+                pos = 0;
+                reprint();
+            } else if (seq == "\x1b[F" || seq == "\x1b[1F") { // end
+                pos = line.size();
+                reprint();
+            }
+            // Anything else (a bare ESC, function keys, other arrow forms)
+            // is dropped.
+            continue;
+        }
+        if (in_paste) {
+            // The paste arrives unedited: newlines and all.
+            if (b == '\r') paste += '\n';
+            else paste += static_cast<char>(b);
+            continue;
+        }
+        if (b == '\n' || b == '\r') {
+            return submit();
+        }
+        if (b == 0x7f || b == '\b') { // backspace / delete
+            if (pos > 0) { del_char_at(pos); reprint(); }
+            continue;
+        }
+        if (b == 4) { // Ctrl-D
+            if (pos == line.size()) return submit(); // as in cooked mode
+            if (line.empty()) break;                // EOF at an empty line
+            size_t adv = next_char(line, pos) - pos; // otherwise delete the character
+            line.erase(pos, adv);
+            reprint();
+            continue;
+        }
+        if (b == 1) { pos = 0; reprint(); continue; } // Ctrl-A: home
+        if (b == 5) { pos = line.size(); reprint(); continue; } // Ctrl-E: end
+        if (b == 2) { // Ctrl-B: left
+            if (pos > 0) { pos = prev_char_start(pos); reprint(); }
+            continue;
+        }
+        if (b == 6) { // Ctrl-F: right
+            if (pos < line.size()) { pos = next_char(line, pos); reprint(); }
+            continue;
+        }
+        if (b < 0x20) continue; // other controls: dropped
+        // A printable character (ASCII, or the first byte of a multi-byte
+        // character, whose remainder is peeked and read as one unit).
+        std::string ch(1, static_cast<char>(b));
+        int want = 0;
+        unsigned char ub = static_cast<unsigned char>(b);
+        if ((ub & 0xE0) == 0xC0) want = 2;
+        else if ((ub & 0xE0) == 0xE0) want = 3;
+        else if ((ub & 0xF0) == 0xF0) want = 4;
+        for (int i = 1; i < want; ++i) {
+            int c = read_byte(false);
+            if (c < 0) break;
+            ch += static_cast<char>(c);
+        }
+        line.insert(pos, ch);
+        pos += ch.size();
+        reprint();
+    }
+    return false; // EOF
+}
+#endif // _WIN32
+
 // Read one logical prompt from stdin. Usually that's a single line, but a
 // multi-line paste must arrive as a single prompt rather than one message per
 // line. Two mechanisms handle this:
@@ -663,10 +1042,22 @@ bool win_char_input_pending(HANDLE in) {
 //    Terminals that don't support bracketed paste never send the markers, so
 //    behaviour is unchanged.
 //
-// Returns false on EOF.
-bool read_user_input(std::string& out) {
+// Returns false on EOF. `prompt` (POSIX only) is the visible prompt text,
+// reprinted by the editor as the line changes; it must not contain escapes
+// because its byte length is used as its width.
+bool read_user_input(std::string& out, const std::string& prompt = "> ") {
     static const std::string kPasteStart = "\x1b[200~";
     static const std::string kPasteEnd   = "\x1b[201~";
+
+    // Interactive terminals on POSIX get real line editing (arrows, history,
+    // pastes), so the arrow keys' ESC sequences never reach the prompt text.
+    // Piped or redirected stdin keeps the generic path below.
+#ifndef _WIN32
+    if (isatty(STDIN_FILENO)) {
+        if (posix_read_line(prompt, out)) return true;
+        return false; // EOF
+    }
+#endif
 
 #ifdef _WIN32
     HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
@@ -729,43 +1120,10 @@ bool read_user_input(std::string& out) {
 //
 // Windows: _kbhit() / _getch() — non-blocking in cooked mode.
 // POSIX:   select() with a zero timeout + read() — requires raw mode, which
-//          is active for exactly the duration of a client->chat() call (see
-//          RawTerminal below); it must be off while read_user_input() runs,
-//          since that relies on cooked line mode and echo.
+//          is active for exactly the duration of a client->chat() call (the
+//          RawTerminal above is active again only while a chat line is being
+//          typed, when posix_read_line() does the line editing itself).
 // ---------------------------------------------------------------------------
-// RAII terminal guard: unbuffered, echo-off stdin for the ESC poll.
-struct RawTerminal {
-    RawTerminal() {
-#ifndef _WIN32
-        if (tcgetattr(STDIN_FILENO, &m_saved) != 0) return;
-        m_raw = m_saved;
-        m_raw.c_lflag &= ~(ICANON | ECHO);
-        m_raw.c_cc[VMIN]  = 0;
-        m_raw.c_cc[VTIME] = 0;
-        if (tcsetattr(STDIN_FILENO, TCSANOW, &m_raw) == 0)
-            m_active = true;
-#else
-        (void)this; // _kbhit works in cooked mode; nothing to do
-#endif
-    }
-    ~RawTerminal() {
-#ifndef _WIN32
-        if (m_active) tcsetattr(STDIN_FILENO, TCSANOW, &m_saved);
-#else
-        (void)this;
-#endif
-    }
-    RawTerminal(const RawTerminal&) = delete;
-    RawTerminal& operator=(const RawTerminal&) = delete;
-#ifndef _WIN32
-    termios m_saved{};
-    termios m_raw{};
-    bool    m_active{false};
-#else
-    int m_dummy;
-#endif
-};
-
 // Non-blocking poll for the interrupt key (ESC). Consumes and discards any
 // other pending input (arrows, repeats, ...) so the queue never sticks.
 bool poll_esc() {
@@ -954,6 +1312,12 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
         if (const std::string extra = folder_prompt(folders); !extra.empty()) {
             prompt += "\n\n" + extra;
         }
+        // The project's memory file: where it lives, the index rule, and the
+        // index itself. Rebuilt with the rest of the prompt, so a memory the
+        // model writes mid-session is picked up at the next rebuild.
+        if (const std::string extra = memory_prompt(); !extra.empty()) {
+            prompt += "\n\n" + extra;
+        }
         client->setSystemPrompt(prompt);
     };
     rebuild_tools_and_prompt();
@@ -1058,8 +1422,11 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
         ui::print_line(msg);
         if (folders.has_grants()) ui::print_line(list_folders_text(folders));
         if (!next.pending_prompt.empty()) {
-            ui::print_line("\x1b[33mThe last prompt had not been answered when the session "
-                           "ended:\x1b[0m\n" + next.pending_prompt);
+            // Shown the way the input would have been: prompt color, so it is
+            // recognized as user text.
+            ui::print_line(std::string("\x1b[33mThe last prompt had not been answered when the session "
+                                       "ended:\x1b[0m\n")
+                           + kPromptColor + "> " + next.pending_prompt + kPromptReset);
         }
         persist();
     };
@@ -1077,11 +1444,19 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
 #endif
     std::string line;
     while (true) {
-        ui::print_prompt("\x1b[?25h> "); // ensure cursor is visible at the prompt
-        if (!read_user_input(line)) {
+        // The marker carries the prompt color: on Windows the console echoes
+        // the typed characters with the current SGR state, so the input comes
+        // out in it (the POSIX editor echoes it itself, in kPromptColor). The
+        // cursor is made visible first: it is hidden while the model works.
+        ui::print_prompt(std::string("\x1b[?25h") + kPromptColor + "> ");
+        if (!read_user_input(line, "> ")) {
+            std::cout << "\x1b[0m" << std::flush; // stop the color after the input
             ui::print_line(""); // move past the prompt on EOF (Ctrl-D / Ctrl-Z)
             break;
         }
+        // Back to the default style before anything else prints: the model's
+        // reply and the status line must not inherit the prompt color.
+        std::cout << "\x1b[0m" << std::flush;
         if (line == "/exit" || line == "/quit") break;
         if (line.empty()) continue;
 
@@ -1354,6 +1729,10 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
                 << "  " << (in_tokens == 0
                           ? std::string("— (no request yet)")
                           : std::to_string(in_tokens) + " input tokens") << "\n"
+                << "\x1b[1m"  << "  Memory"      << "\x1b[0m"
+                << "  " << (memory_path().empty()
+                          ? std::string("— (no project directory)")
+                          : memory_path().string()) << "\n"
                 << "\x1b[1m"  << "  Saved to"    << "\x1b[0m"
                 << "  " << session_file.string() << "\n"
                 << "\x1b[1m"  << "  Max tool it." << "\x1b[0m"

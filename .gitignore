@@ -30,3 +30,4 @@ Makefile
 # Local store is now central (~/.tapto/projects); kept as a safety net so a
 # stray or legacy ./.tapto is never committed.
 .tapto/
+tapto.log

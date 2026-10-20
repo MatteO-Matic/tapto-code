@@ -70,9 +70,10 @@ void enable_console_features() {
 // the lines the user typed standing out from the model's plain markdown in the
 // scrollback. Painted by the chat loop (the > marker), by the POSIX editor's
 // echo, and inherited by the Windows console's echo; a reset follows every
-// read so it never leaks into the model's reply or the status line.
-constexpr const char* kPromptColor = "\x1b[33m";
-constexpr const char* kPromptReset = "\x1b[0m";
+// read so it never leaks into the model's reply or the status line. Shared
+// with ui.cpp, which shows earlier prompts in it on /resume.
+using ui::kPromptColor;
+using ui::kPromptReset;
 
 const char* kUsage =
     "tapto-code - a small cross-platform CLI\n"
@@ -1549,15 +1550,18 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
         if (next.model != model) msg += ", held with " + next.model;
         if (saved) msg += "; /resume again to switch back";
         msg += ")";
-        ui::print_line(msg);
-        if (folders.has_grants()) ui::print_line(list_folders_text(folders));
+        if (folders.has_grants()) msg += "\n" + list_folders_text(folders);
         if (!next.pending_prompt.empty()) {
             // Shown the way the input would have been: prompt color, so it is
             // recognized as user text.
-            ui::print_line(std::string("\x1b[33mThe last prompt had not been answered when the session "
-                                       "ended:\x1b[0m\n")
-                           + kPromptColor + "> " + next.pending_prompt + kPromptReset);
+            msg += std::string("\n\x1b[33mThe last prompt had not been answered when the session "
+                               "ended:\x1b[0m\n") +
+                   kPromptColor + "> " + next.pending_prompt + kPromptReset;
         }
+        // Where the conversation stood, as it looked: about a screenful of its
+        // end, sized so that it and the notice below both stay in view.
+        ui::print_transcript(transcript(next.history), msg);
+        ui::print_line(msg);
         persist();
     };
     if (resume) {

@@ -130,4 +130,83 @@ std::optional<SavedSession> load_session(const fs::path& path, std::string& erro
     return s;
 }
 
+std::vector<TranscriptEntry> transcript(const json& history) {
+    // The message all three clients seed the history with after /compact
+    // (libtapto's beginWithSummary).
+    static const std::string kSummaryPrefix =
+        "(The conversation prior to this point has been summarized for context):";
+
+    std::vector<TranscriptEntry> out;
+    if (!history.is_array()) return out;
+
+    for (const auto& msg : history) {
+        if (!msg.is_object()) continue;
+        const std::string role = msg.value("role", std::string());
+        const bool user = role == "user";
+        const bool model = role == "assistant" || role == "model";
+        if (!user && !model) continue; // openai's "tool" and "system" turns
+
+        // The message's text, and whether it also carries anything that is
+        // not text the user or the model wrote.
+        std::string text;
+        bool other = false;
+        auto add_text = [&](const json& t, const char* sep) {
+            if (!t.is_string()) return;
+            if (!text.empty()) text += sep;
+            text += t.get<std::string>();
+        };
+        if (msg.contains("content")) {
+            const json& c = msg["content"];
+            if (c.is_string()) {
+                add_text(c, "");
+            } else if (c.is_array()) {
+                // claude and openai blocks: text is shown; thinking is the
+                // model's own; tool_use, tool_result, image and image_url are
+                // what a tool did.
+                for (const auto& block : c) {
+                    if (!block.is_object()) continue;
+                    const std::string type = block.value("type", std::string());
+                    if (type == "text") add_text(block.value("text", json()), "\n");
+                    else if (type != "thinking" && type != "redacted_thinking") other = true;
+                }
+            }
+        }
+        if (msg.contains("parts") && msg["parts"].is_array()) {
+            // gemini: text parts are shown unless they are a thought, and run
+            // on, since one answer can come split over several; functionCall,
+            // functionResponse and inlineData are a tool's.
+            for (const auto& part : msg["parts"]) {
+                if (!part.is_object()) continue;
+                if (part.contains("text")) {
+                    if (!part.value("thought", false)) add_text(part["text"], "");
+                } else {
+                    other = true;
+                }
+            }
+        }
+
+        // Trailing blank lines and spaces do not show.
+        const std::size_t end = text.find_last_not_of(" \t\r\n");
+        text.erase(end == std::string::npos ? 0 : end + 1);
+
+        if (user) {
+            if (other) continue; // tool results and images, not a prompt
+            if (text.rfind(kSummaryPrefix, 0) == 0) {
+                out.push_back({TranscriptEntry::Who::Summary, std::string()});
+                continue;
+            }
+            if (!text.empty()) out.push_back({TranscriptEntry::Who::User, std::move(text)});
+        } else if (!text.empty()) {
+            // A model turn that only called tools has no text, and the texts
+            // around tool calls are one answer to the same prompt.
+            if (!out.empty() && out.back().who == TranscriptEntry::Who::Model) {
+                out.back().text += "\n\n" + text;
+            } else {
+                out.push_back({TranscriptEntry::Who::Model, std::move(text)});
+            }
+        }
+    }
+    return out;
+}
+
 } // namespace tapto

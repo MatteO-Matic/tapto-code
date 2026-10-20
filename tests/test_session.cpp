@@ -158,6 +158,63 @@ int main() {
              tapto::config_path(tapto::Level::Local).parent_path().string());
     CHECK_EQ(tapto::session_path().filename().string(), "session.json");
 
+    // --- the transcript /resume shows, from each dialect's history -----------
+    // The prompts and the model's text, in order; the model's texts around
+    // its tool calls joined; tool turns, images and thinking left out; the
+    // /compact seed a marker of its own.
+    {
+        using Who = tapto::TranscriptEntry::Who;
+        auto render = [](const std::vector<tapto::TranscriptEntry>& t) {
+            std::string out;
+            for (const auto& e : t) {
+                out += e.who == Who::User ? "U:" : e.who == Who::Model ? "M:" : "S:";
+                out += e.text + "|";
+            }
+            return out;
+        };
+        const std::string seed =
+            "(The conversation prior to this point has been summarized for context):\nwe did X";
+
+        json claude = json::parse(R"([
+            {"role":"user","content":"fix the build"},
+            {"role":"assistant","content":[
+                {"type":"thinking","thinking":"hmm","signature":"s"},
+                {"type":"text","text":"Looking at it."},
+                {"type":"tool_use","id":"t1","name":"run_command","input":{}}]},
+            {"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"t1","content":"ok"}]},
+            {"role":"assistant","content":[{"type":"text","text":"Fixed.\n\n"}]},
+            {"role":"user","content":[{"type":"text","text":"thanks","cache_control":{"type":"ephemeral"}}]}
+        ])");
+        claude.insert(claude.begin(), json{{"role", "user"}, {"content", seed}});
+        CHECK_EQ(render(tapto::transcript(claude)),
+                 "S:|U:fix the build|M:Looking at it.\n\nFixed.|U:thanks|");
+
+        const json openai = json::parse(R"([
+            {"role":"system","content":"be brief"},
+            {"role":"user","content":"show the logo"},
+            {"role":"assistant","content":null,"reasoning_content":"think",
+             "tool_calls":[{"id":"c1","type":"function","function":{"name":"view","arguments":"{}"}}]},
+            {"role":"tool","tool_call_id":"c1","content":"done"},
+            {"role":"user","content":[{"type":"text","text":"logo.png:"},
+                {"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]},
+            {"role":"assistant","content":"It is blue."}
+        ])");
+        CHECK_EQ(render(tapto::transcript(openai)), "U:show the logo|M:It is blue.|");
+
+        const json gemini = json::parse(R"([
+            {"role":"user","parts":[{"text":"list files"}]},
+            {"role":"model","parts":[{"text":"pondering","thought":true},
+                {"functionCall":{"name":"find_files","args":{}}}]},
+            {"role":"user","parts":[{"functionResponse":{"name":"find_files","response":{"content":"a.cpp"}}}]},
+            {"role":"model","parts":[{"text":"There is "},{"text":"a.cpp."}]}
+        ])");
+        CHECK_EQ(render(tapto::transcript(gemini)), "U:list files|M:There is a.cpp.|");
+
+        CHECK_EQ(render(tapto::transcript(json::object())), "");
+        CHECK_EQ(render(tapto::transcript(json::parse(R"([1,"x",{"role":"user"}])"))), "");
+    }
+
     fs::remove_all(kDir, ec);
 
     std::cout << (g_failures ? "FAILED " : "ok ") << (g_checks - g_failures) << "/" << g_checks

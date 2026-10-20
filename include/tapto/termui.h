@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "tapto/session.h"
 #include "tapto/ui.h"
 
 // ---------------------------------------------------------------------------
@@ -26,8 +27,22 @@ namespace tapto::ui {
 
 // --- Permanent output (scrolls into transcript) ----------------------------
 
+// The color the user's own input is shown in, and the reset after it: the
+// chat loop's prompt, the POSIX line editor's echo and /resume's replay of
+// earlier prompts all use it, so the user's lines look the same everywhere.
+inline constexpr const char* kPromptColor = "\x1b[33m";
+inline constexpr const char* kPromptReset = "\x1b[0m";
+
 // Print the model's final reply (plain, no prefix).
 void print_reply(const std::string& text);
+
+// Print the end of a resumed conversation as it looked on the screen, about
+// one screenful: the user's prompts in the prompt color, the model's text as
+// a reply. `after` is what the caller prints next (the resume notice, the
+// folders, an unanswered prompt), counted with the prompt line below it, so
+// the start of what is shown stays on screen above them. An older part that
+// does not fit is not shown, and a line says so.
+void print_transcript(const std::vector<TranscriptEntry>& entries, const std::string& after);
 
 // Print a usage/diagnostic message to stderr.
 void print_usage(const std::string& text);

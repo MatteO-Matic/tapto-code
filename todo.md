@@ -71,9 +71,12 @@ moving the project memory into a plugin is listed there.
       - In the core, on every tool result, plugin tools' included (1.2.0).
       - To decide: what the model gets inline, the first lines, the last, or
         both. A build log's errors are usually at its end.
-- [ ] **`/resume` shows where you were.** Print the end of the old
+- [x] **`/resume` shows where you were.** Print the end of the old
       conversation, about one screenful, so the user sees what was said
-      before carrying on, not only the pending prompt.
+      before carrying on, not only the pending prompt. For 1.2.0:
+      `transcript()` in session.cpp reads the prompts and the model's text
+      out of all three dialects' histories; `ui::print_transcript` sizes it
+      to the terminal, counting what is printed after it.
 - [ ] **[ro] commands.** Let a configured command run in, and take `%p`
       paths from, a read-only `/add-folder` grant. Today only the built-ins
       (`cat`, `ls`, ...) reach read-only grants: every other command's `cwd`

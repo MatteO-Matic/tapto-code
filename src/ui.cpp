@@ -3,8 +3,10 @@
 
 #include "tapto/termui.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -297,6 +299,36 @@ size_t terminal_width() {
         return static_cast<size_t>(ws.ws_col);
 #endif
     return 80;
+}
+
+// The terminal's height in rows, or 24 when stdout is not a terminal.
+size_t terminal_height() {
+#ifdef _WIN32
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi))
+        return static_cast<size_t>(csbi.srWindow.Bottom - csbi.srWindow.Top + 1);
+#else
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0)
+        return static_cast<size_t>(ws.ws_row);
+#endif
+    return 24;
+}
+
+// The columns a rendered line takes: display_width without the ANSI escape
+// sequences (colors, styles), which take none.
+size_t visible_width(const std::string& s) {
+    std::string plain;
+    plain.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '\x1b' && i + 1 < s.size() && s[i + 1] == '[') {
+            i += 2;
+            while (i < s.size() && !(s[i] >= 0x40 && s[i] <= 0x7E)) ++i;
+            continue;
+        }
+        plain += s[i];
+    }
+    return display_width(plain);
 }
 
 // Clip a raw (pre-render) cell string to at most `max_cols` visible columns,
@@ -715,6 +747,75 @@ void emit_intermediate(const std::string& text, bool is_reasoning, bool print_co
 
 void print_reply(const std::string& text) {
     std::cout << render_markdown(text) << "\n";
+}
+
+void print_transcript(const std::vector<TranscriptEntry>& entries, const std::string& after) {
+    if (entries.empty()) return;
+    const size_t cols = std::max<size_t>(terminal_width(), 1);
+    // The rows a line takes, wrapped at the terminal's width.
+    auto rows_of = [&](const std::string& line) {
+        const size_t w = visible_width(line);
+        return w == 0 ? size_t{1} : (w + cols - 1) / cols;
+    };
+
+    // Every entry rendered as it was on the screen, one string per line: the
+    // prompt in the prompt color behind its marker, the model's text as
+    // Markdown, a blank line between the two.
+    std::vector<std::string> lines;
+    for (const auto& e : entries) {
+        if (!lines.empty()) lines.emplace_back();
+        std::vector<std::string> block;
+        switch (e.who) {
+        case TranscriptEntry::Who::User: {
+            std::istringstream in(e.text);
+            std::string l;
+            bool first = true;
+            while (std::getline(in, l)) {
+                block.push_back(std::string(kPromptColor) + (first ? "> " : "") + l + kPromptReset);
+                first = false;
+            }
+            break;
+        }
+        case TranscriptEntry::Who::Model: {
+            std::istringstream in(render_markdown(e.text));
+            std::string l;
+            while (std::getline(in, l)) block.push_back(l);
+            while (!block.empty() && visible_width(block.back()) == 0) block.pop_back();
+            break;
+        }
+        case TranscriptEntry::Who::Summary:
+            block.push_back(std::string(kDim) +
+                            "(the conversation before this was summarized with /compact)" + kReset);
+            break;
+        }
+        lines.insert(lines.end(), block.begin(), block.end());
+    }
+
+    // About one screenful: the lines from the end that fit in the terminal's
+    // height, less what is printed after them (`after`, the blank line that
+    // ends this, the prompt) and the line saying that more came before. Rows
+    // are counted as long lines wrap. What does not fit is said to be there,
+    // not shown.
+    size_t reserve = 3;
+    {
+        std::istringstream in(after);
+        std::string l;
+        while (std::getline(in, l)) reserve += rows_of(l);
+    }
+    const size_t height = terminal_height();
+    const size_t budget = height > reserve + 3 ? height - reserve : 3;
+    size_t first = lines.size();
+    size_t rows = 0;
+    while (first > 0) {
+        const size_t r = rows_of(lines[first - 1]);
+        if (rows + r > budget) break;
+        rows += r;
+        --first;
+    }
+    while (first < lines.size() && visible_width(lines[first]) == 0) ++first;
+    if (first > 0) std::cout << kDim << "(earlier messages not shown)" << kReset << "\n";
+    for (size_t i = first; i < lines.size(); ++i) std::cout << lines[i] << "\n";
+    std::cout << "\n" << std::flush;
 }
 
 void print_line(const std::string& text) {

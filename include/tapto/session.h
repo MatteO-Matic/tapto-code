@@ -49,4 +49,23 @@ std::string save_session(const std::filesystem::path& path, SavedSession s);
 // cannot be used sets `error` and also returns nullopt.
 std::optional<SavedSession> load_session(const std::filesystem::path& path, std::string& error);
 
+// One step of a conversation as the user saw it on the screen, for /resume
+// to show where the conversation stood.
+struct TranscriptEntry {
+    enum class Who {
+        User,    // a prompt the user typed
+        Model,   // what the model wrote back (its text between tool calls too)
+        Summary, // the /compact summary the conversation starts from; no text
+    };
+    Who who = Who::User;
+    std::string text;
+};
+
+// The conversation in `history`, any of the three dialects' shapes, as the
+// user saw it: their prompts and the model's text, in order. Tool calls, tool
+// results, images and the model's thinking are left out, and a user turn that
+// carries any of them is a tool's turn, not a prompt. The model's texts
+// between two prompts are joined into one entry.
+std::vector<TranscriptEntry> transcript(const nlohmann::json& history);
+
 } // namespace tapto

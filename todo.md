@@ -10,7 +10,9 @@ and kept for its notes.
 Not scheduled into a release yet. The plugin framework is 1.2.0 below, and
 moving the project memory into a plugin is listed there.
 
-- [ ] **System labels: `@memory` and `@tmp`.** The project's own folders
+- [ ] **System labels: `@memory` and `@tmp`.** `@tmp` done for 1.2.0:
+      libtapto `v0.3.0` (`FolderSet::add_system`, deepest owner wins),
+      tapto-code `@tmp`. `@memory` still to do. The project's own folders
       under `~/.tapto/projects/<project>/`, reachable by label the way
       `/add-folder` grants are, so the model, the tool results and the
       prompt name them the same short way in every session.
@@ -54,7 +56,16 @@ moving the project memory into a plugin is listed there.
         so the model can search an overflow file instead of paging it.
       - To decide: `@` as the mark. And `@tmp` per project (simpler) or per
         session (clean-up is removing one folder).
-- [ ] **Tool overflow.** When a tool's output passes the limit (a large
+- [x] **Tool overflow.** Done for 1.2.0 (`src/overflow.cpp`), with `@tmp`
+      per session (`tmp/<pid>-<time>/`, stale ones removed at start), head and
+      tail inline (6000 bytes each, whole lines), past 16000 bytes; only for
+      `run_command` (built-ins and commands), since `view` and `read_file`
+      read files the model can range over itself. Decided 20 Oct: `@` as the
+      mark, `@tmp` per session, head and tail. Still open: `exec_capture`
+      keeps all of a command's output in memory, so a runaway command can
+      exhaust it; a cap (say 50 MB, the rest discarded with a note) belongs
+      there. Original notes:
+- [ ] ~~Tool overflow~~ When a tool's output passes the limit (a large
       `git status`, a build log), the whole output is written to a file in
       `@tmp` and the model gets what fits, plus a line saying where the rest
       is: "The output was cut. Lines 500-1132 are in `@tmp/sdjksf.txt`." It

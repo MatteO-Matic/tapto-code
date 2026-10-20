@@ -5,6 +5,7 @@
 #include "tapto/config.h"
 #include "tapto/fstools.h"
 #include "tapto/memory.h"
+#include "tapto/overflow.h"
 #include "tapto/paths.h"
 #include "tapto/policy.h"
 #include "tapto/prompt.h"
@@ -531,8 +532,10 @@ std::string list_folders_text(const FolderSet& folders) {
     out << "The model can reach these folders:\n";
     for (const auto& f : folders.folders()) {
         out << "  " << f.label << "  ->  " << f.root.generic_string()
-            << (f.home ? "  (working directory, read-write)"
-                       : f.writable ? "  (read-write)" : "  (read-only)") << "\n";
+            << (f.home     ? std::string("  (working directory, read-write)")
+                : f.system ? "  (tapto-code's: " + f.note + (f.writable ? ", read-write)" : ", read-only)")
+                : f.writable ? std::string("  (read-write)") : std::string("  (read-only)"))
+            << "\n";
     }
     if (!folders.has_grants()) {
         out << "No other folders are granted. Grant one with /add-folder <path> [ro|rw].";
@@ -1443,6 +1446,24 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
                                                  /*writable=*/true);
         if (!err.empty()) ui::print_error("working directory: " + err);
     }
+    // This session's folder for tool output too long to show (tapto/overflow.h),
+    // reached by the model as @tmp, read-only, and removed when the chat ends.
+    struct SessionTmp {
+        ~SessionTmp() { close_session_tmp(); }
+    } session_tmp;
+    {
+        std::string err;
+        const std::filesystem::path tmp = open_session_tmp(err);
+        if (!tmp.empty()) {
+            err = folders.add_system("@tmp", tmp.string(), /*writable=*/false,
+                                     "whole output of tool results too long to show");
+        }
+        if (err.empty()) {
+            set_overflow_folder(tmp, "@tmp");
+        } else {
+            ui::print_warning("long tool output will be cut, not kept: " + err);
+        }
+    }
     set_granted_folders(&folders); // outlives the chat loop below
     auto rebuild_tools_and_prompt = [&]() {
         context.tools = builtin_tools();
@@ -1501,7 +1522,7 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
         s.dialect = provider->dialect;
         s.model = model;
         for (const auto& f : folders.folders()) {
-            if (!f.home) s.folders.push_back({f.root.string(), f.writable});
+            if (!f.home && !f.system) s.folders.push_back({f.root.string(), f.writable});
         }
         s.pending_prompt = pending;
         s.history = client->getHistory();
@@ -1969,6 +1990,11 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
             if (const Folder* f = folders.get(arg); f && f->home) {
                 ui::print_line("'" + arg + "' is the working directory tapto-code was started "
                                "in; it cannot be removed or made read-only.");
+                continue;
+            }
+            if (const Folder* f = folders.get(arg); f && f->system) {
+                ui::print_line("'" + f->label + "' is tapto-code's own folder (" + f->note +
+                               "), not a grant; it cannot be removed.");
                 continue;
             }
             if (!folders.remove(arg)) {

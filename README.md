@@ -218,7 +218,16 @@ brings back the conversation that was saved when the session started). The folde
 `/add-folder` come back with it, and a prompt that was still being answered is
 printed so you can send it again; the work the model did on that last turn is
 in your files but not in the conversation. A new conversation replaces the
-saved one with its first turn.
+saved one with its first turn. Resuming prints about a screenful of the end of
+the conversation, so you can see where you left off.
+
+**Long command output.** When a command prints more than about 16 KB, the model
+gets its first and last lines and a note saying which lines were left out and
+where the whole output is: a file in this session's own folder, which the model
+knows as `@tmp` (`~/.tapto/projects/<folder>/tmp/<session>/`). It reads or
+searches the rest there as it needs. The model can read `@tmp` but nothing can
+write to it, and the folder is removed when the session ends (or, after a
+crash, when the next session in any folder of the project starts).
 
 `/resume` also undoes `/clear`: the cleared conversation is set aside, and
 stays on disk until your next turn, so `--resume` brings it back too. When a

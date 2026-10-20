@@ -30,7 +30,7 @@ endif()
 # on MSVC, so a warning it trips here is fixed in the library and released.
 set(LIBTAPTO_BUILD_TESTS ON CACHE BOOL "" FORCE)
 include(FetchContent)
-set(LIBTAPTO_TAG "v0.2.0" CACHE STRING "libtapto version to build against")
+set(LIBTAPTO_TAG "v0.3.0" CACHE STRING "libtapto version to build against")
 FetchContent_Declare(libtapto
   GIT_REPOSITORY https://github.com/centlakestefan/libtapto.git
   GIT_TAG        ${LIBTAPTO_TAG}
@@ -77,6 +77,7 @@ add_executable(tapto-code
   src/main.cpp
   src/commands.cpp
   src/memory.cpp
+  src/overflow.cpp
   src/prompt.cpp
   src/session.cpp
   src/tools.cpp
@@ -108,6 +109,7 @@ add_executable(test-edits
   src/tools.cpp
   src/commands.cpp
   src/memory.cpp
+  src/overflow.cpp
   "${libtapto_SOURCE_DIR}/test/ui_null.cpp"
 )
 target_include_directories(test-edits PRIVATE include)
@@ -162,6 +164,7 @@ add_executable(test-memory
   src/tools.cpp
   src/commands.cpp
   src/memory.cpp
+  src/overflow.cpp
   "${libtapto_SOURCE_DIR}/test/ui_null.cpp"
 )
 target_include_directories(test-memory PRIVATE include)
@@ -169,3 +172,20 @@ target_link_libraries(test-memory PRIVATE tapto::tapto)
 tapto_code_warnings(test-memory)
 
 add_test(NAME memory COMMAND test-memory)
+
+# Tool output too long for the conversation: the head and tail inline, the
+# whole of it in the session's @tmp folder, which the model can read and
+# nothing can write.
+add_executable(test-overflow
+  tests/test_overflow.cpp
+  src/tools.cpp
+  src/commands.cpp
+  src/memory.cpp
+  src/overflow.cpp
+  "${libtapto_SOURCE_DIR}/test/ui_null.cpp"
+)
+target_include_directories(test-overflow PRIVATE include)
+target_link_libraries(test-overflow PRIVATE tapto::tapto)
+tapto_code_warnings(test-overflow)
+
+add_test(NAME overflow COMMAND test-overflow)

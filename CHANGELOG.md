@@ -65,6 +65,9 @@ breaking changes and the patch number everything else.)
 
 - What you type at the prompt is now shown in yellow, so your own lines stand
   out from the model's replies.
+- A command whose output was longer than about 16 KB lost everything after
+  that. The model now sees the start and the end, and reads the rest from a
+  file tapto-code keeps for the session and removes when it ends.
 
 ### Fixed
 

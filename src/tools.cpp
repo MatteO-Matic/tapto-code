@@ -6,6 +6,7 @@
 
 #include "tapto/context.h"
 #include "tapto/memory.h"
+#include "tapto/overflow.h"
 #include "tapto/policy.h"
 
 #include <algorithm>
@@ -187,14 +188,21 @@ bool is_under(const fs::path& root, const fs::path& path) {
     return !rel.empty() && *rel.begin() != fs::path("..");
 }
 
-// The granted folder that owns `resolved`, or null. `writable_only` narrows
-// it to the ones the user marked rw.
+// The granted folder that owns `resolved`, or null: the deepest one that
+// holds it, so tapto-code's own folders (@tmp) keep their mode inside a grant
+// or home root that covers them. `writable_only` narrows it to rw ones.
 const Folder* granted_owner(const fs::path& resolved, bool writable_only) {
     if (!g_folders) return nullptr;
-    for (const auto& f : g_folders->folders()) {
-        if ((f.writable || !writable_only) && is_under(f.root, resolved)) return &f;
-    }
-    return nullptr;
+    const Folder* f = g_folders->owner(resolved);
+    return f && (f->writable || !writable_only) ? f : nullptr;
+}
+
+// True when `resolved` is in one of tapto-code's own folders that the model
+// may only read (@tmp): what is there was written by tapto-code, so a command
+// that says it only reads may be pointed at it, although it is in ~/.tapto.
+bool in_read_only_program_folder(const fs::path& resolved) {
+    const Folder* f = granted_owner(resolved, /*writable_only=*/false);
+    return f && f->system && !f->writable;
 }
 
 // What a path may reach beyond the working directory, which every scope has.
@@ -271,6 +279,11 @@ bool resolve_in_sandbox(const std::string& input, fs::path& out, std::string& er
     fs::path in_path(input);
 
     auto refuse_read_only = [&](const Folder& f) {
+        if (f.system) {
+            error = "ERROR: '" + input + "' is in " + f.label + ", tapto-code's own folder (" +
+                    f.note + "). It can be read, not changed.";
+            return false;
+        }
         error = "ERROR: '" + input + "' is in '" + f.label + "', which the user granted "
                 "read-only. Reading it is fine (read_file, view, cat, and the commands "
                 "list_commands marks [ro]); to change it or run another command there, ask "
@@ -281,7 +294,9 @@ bool resolve_in_sandbox(const std::string& input, fs::path& out, std::string& er
     if (grants && !in_path.is_absolute() && !in_path.empty() && anchor == root) {
         const std::string head = in_path.begin()->string();
         const Folder* f = g_folders->get(head);
-        if (f && !fs::exists(anchor / head, ec)) {
+        // A grant's label gives way to a project entry of the same name;
+        // tapto-code's own '@' labels never do.
+        if (f && (f->system || !fs::exists(anchor / head, ec))) {
             if (writes && !f->writable) return refuse_read_only(*f);
             fs::path rest;
             for (auto it = std::next(in_path.begin()); it != in_path.end(); ++it) rest /= *it;
@@ -1259,7 +1274,8 @@ bool build_argv(const std::string& tpl, const std::vector<std::string>& args,
         fs::path resolved;
         std::string perr;
         if (!resolve_in_sandbox(value, resolved, perr, base, path_scope)) { error = perr; return false; }
-        if (refuse_protected_write(resolved, value, perr)) { error = perr; return false; }
+        const bool program_read = reads_only && in_read_only_program_folder(resolved);
+        if (!program_read && refuse_protected_write(resolved, value, perr)) { error = perr; return false; }
         out = resolved.string();
         return true;
     };
@@ -1889,8 +1905,11 @@ std::string execute_run_command(Context& /*context*/, const json& in) {
             // A built-in only reads, so it may look inside a git directory or
             // tapto-code's own folders. Any other command run there could
             // write whatever it likes: a [ro] one too, since its mark is a
-            // promise tapto-code cannot check.
-            if (!builtin && refuse_protected_write(base, raw, err)) return err;
+            // promise tapto-code cannot check. The exception is tapto-code's
+            // own read-only folders (@tmp), which hold nothing a write there
+            // could turn into more access.
+            const bool program_read = reads_only && in_read_only_program_folder(base);
+            if (!builtin && !program_read && refuse_protected_write(base, raw, err)) return err;
             std::error_code ec;
             if (!fs::is_directory(base, ec)) {
                 return "ERROR: cwd '" + raw + "' is not an existing directory. "
@@ -1904,7 +1923,7 @@ std::string execute_run_command(Context& /*context*/, const json& in) {
         // every OS (and work on pure Windows where wc/head/etc. are absent).
         // Their target path resolves against `base` (they also accept a
         // relative-from-root path directly).
-        if (builtin) return run_builtin_command(name, args, base);
+        if (builtin) return overflow(run_builtin_command(name, args, base), name);
 
         // What runs is the command line without its [ro] mark.
         const std::string tpl = command_template(it->second);
@@ -1933,8 +1952,9 @@ std::string execute_run_command(Context& /*context*/, const json& in) {
         // not output of the program.
         if (!started) return output;
 
-        constexpr size_t kMaxBytes = 16000;
-        if (output.size() > kMaxBytes) output = output.substr(0, kMaxBytes) + "\n... [output truncated]";
+        // Too long for the conversation: the head and tail, and the whole of
+        // it in @tmp for the model to read as it needs (tapto/overflow.h).
+        output = overflow(output, name);
 
         std::ostringstream r;
         fs::path rel = base.lexically_relative(sandbox_root());

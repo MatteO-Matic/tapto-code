@@ -189,3 +189,16 @@ target_link_libraries(test-overflow PRIVATE tapto::tapto)
 tapto_code_warnings(test-overflow)
 
 add_test(NAME overflow COMMAND test-overflow)
+
+# Markdown table rendering: wrapping (not clipping), alignment, inline styling
+# and CJK width are exercised at explicit widths via render_markdown (pure,
+# no stdout).
+add_executable(test-ui
+  tests/test_ui.cpp
+  src/ui.cpp
+)
+target_include_directories(test-ui PRIVATE include)
+target_link_libraries(test-ui PRIVATE tapto::tapto)
+tapto_code_warnings(test-ui)
+
+add_test(NAME ui COMMAND test-ui)

@@ -36,6 +36,12 @@ inline constexpr const char* kPromptReset = "\x1b[0m";
 // Print the model's final reply (plain, no prefix).
 void print_reply(const std::string& text);
 
+// Render Markdown text to ANSI-styled terminal output. Tables are wrapped so
+// the rendered width never exceeds `max_width` visible columns (the terminal
+// width in normal use; a smaller value in tests). Pure function: returns the
+// rendered string for the caller to emit.
+std::string render_markdown(const std::string& text, size_t max_width);
+
 // Print the end of a resumed conversation as it looked on the screen, about
 // one screenful: the user's prompts in the prompt color, the model's text as
 // a reply. `after` is what the caller prints next (the resume notice, the

@@ -128,6 +128,27 @@ bool is_hr(const std::string& line) {
 
 // --- Table helpers ----------------------------------------------------------
 
+// True if the codepoint renders two terminal columns (CJK, fullwidth, most
+// emoji). A best-effort approximation without a full Unicode database.
+bool is_wide(uint32_t cp) {
+    return (cp >= 0x1100  && cp <= 0x115F)  || (cp >= 0x2E80  && cp <= 0x303E)  ||
+           (cp >= 0x3041  && cp <= 0x33BF)  || (cp >= 0x33FF  && cp <= 0xA4CF)  ||
+           (cp >= 0xA960  && cp <= 0xA97F)  || (cp >= 0xAC00  && cp <= 0xD7FF)  ||
+           (cp >= 0xF900  && cp <= 0xFAFF)  || (cp >= 0xFE10  && cp <= 0xFE1F)  ||
+           (cp >= 0xFE30  && cp <= 0xFE6F)  || (cp >= 0xFF00  && cp <= 0xFF60)  ||
+           (cp >= 0xFFE0  && cp <= 0xFFE6)  || (cp >= 0x1B000 && cp <= 0x1B0FF) ||
+           (cp >= 0x1F004 && cp <= 0x1F0CF) || (cp >= 0x1F300 && cp <= 0x1F9FF) ||
+           (cp >= 0x20000 && cp <= 0x2FFFD) || (cp >= 0x30000 && cp <= 0x3FFFD);
+}
+
+// True if the codepoint is zero-width: a combining mark, ZWJ or variation
+// selector that composes onto the preceding glyph and adds no column.
+bool is_combining(uint32_t cp) {
+    return (cp >= 0x0300 && cp <= 0x036F)  || (cp >= 0x1DC0 && cp <= 0x1DFF)  ||
+           (cp >= 0x20D0 && cp <= 0x20FF)  || (cp >= 0xFE20 && cp <= 0xFE2F) ||
+           cp == 0xFE0F || cp == 0x200D;
+}
+
 // Returns the terminal display width of a UTF-8 string.
 // ASCII: 1 column. Wide (CJK, emoji, etc.): 2 columns. Continuation bytes and
 // combining characters: 0 columns added (they compose onto the base glyph).
@@ -157,37 +178,8 @@ size_t display_width(const std::string& s) {
             cp = (cp << 6) | (p[i] & 0x3F);
         p += bytes;
 
-        // Combining / zero-width characters contribute 0 columns.
-        if ((cp >= 0x0300 && cp <= 0x036F) ||   // Combining Diacritical Marks
-            (cp >= 0x1DC0 && cp <= 0x1DFF) ||   // Combining Diacritical Supplement
-            (cp >= 0x20D0 && cp <= 0x20FF) ||   // Combining Diacritical for Symbols
-            (cp >= 0xFE20 && cp <= 0xFE2F) ||   // Combining Half Marks
-            cp == 0xFE0F ||                       // Variation Selector-16 (emoji style)
-            cp == 0x200D) {                       // Zero Width Joiner
-            continue;
-        }
-
-        // Wide characters (CJK unified, compatibility, radicals, symbols, emoji).
-        if ((cp >= 0x1100  && cp <= 0x115F)  ||  // Hangul Jamo
-            (cp >= 0x2E80  && cp <= 0x303E)  ||  // CJK Radicals / Kangxi
-            (cp >= 0x3041  && cp <= 0x33BF)  ||  // Hiragana … CJK Compatibility
-            (cp >= 0x33FF  && cp <= 0xA4CF)  ||  // CJK Unified Ideographs ext.
-            (cp >= 0xA960  && cp <= 0xA97F)  ||  // Hangul Jamo Extended-A
-            (cp >= 0xAC00  && cp <= 0xD7FF)  ||  // Hangul Syllables
-            (cp >= 0xF900  && cp <= 0xFAFF)  ||  // CJK Compatibility Ideographs
-            (cp >= 0xFE10  && cp <= 0xFE1F)  ||  // Vertical Forms
-            (cp >= 0xFE30  && cp <= 0xFE6F)  ||  // CJK Compatibility Forms
-            (cp >= 0xFF00  && cp <= 0xFF60)  ||  // Fullwidth Forms
-            (cp >= 0xFFE0  && cp <= 0xFFE6)  ||  // Fullwidth Signs
-            (cp >= 0x1B000 && cp <= 0x1B0FF) ||  // Kana Supplement
-            (cp >= 0x1F004 && cp <= 0x1F0CF) ||  // Mahjong / Playing Cards
-            (cp >= 0x1F300 && cp <= 0x1F9FF) ||  // Misc Symbols, Emoticons, etc.
-            (cp >= 0x20000 && cp <= 0x2FFFD) ||  // CJK Extension B–F
-            (cp >= 0x30000 && cp <= 0x3FFFD)) {  // CJK Extension G+
-            width += 2;
-        } else {
-            width += 1;
-        }
+        if (is_combining(cp)) continue;        // zero-width: no column added
+        width += is_wide(cp) ? 2 : 1;
     }
     return width;
 }
@@ -403,83 +395,269 @@ std::string clip_cell(const std::string& raw, size_t max_cols, size_t& out_width
     return raw; // no clipping needed
 }
 
-// Render a collected table (header row + data rows) into out.
-// Columns are padded to uniform width per column.
+// One space-separated word in a Markdown cell: its visible text (markers
+// removed), its display width in terminal columns, and the ANSI style it was
+// rendered in ("" when plain).
+struct StyledWord {
+    std::string text;
+    size_t      width;
+    const char* style;
+};
+
+// Split a raw cell (with inline Markdown: **bold**, *italic*, `code`) into
+// space-separated styled words, mirroring render_inline()'s marker handling.
+// The word's style is whichever style was active at its start.
+std::vector<StyledWord> tokenize_styled(const std::string& cell) {
+    std::vector<StyledWord> words;
+    std::string cur;
+    const char* cur_style = "";
+    const size_t n = cell.size();
+    size_t i = 0;
+
+    auto flush = [&]() {
+        if (!cur.empty()) {
+            StyledWord w;
+            w.text  = cur;
+            w.width = display_width(cur);
+            w.style = cur_style;
+            words.push_back(std::move(w));
+            cur.clear();
+        }
+    };
+
+    while (i < n) {
+        char c = cell[i];
+
+        // Inline code: `...`
+        if (c == '`') {
+            size_t end = cell.find('`', i + 1);
+            if (end != std::string::npos) {
+                const char* save = cur_style;
+                cur_style = kCyan;
+                for (size_t j = i + 1; j < end; ++j) {
+                    if (cell[j] == ' ') flush();
+                    else cur += cell[j];
+                }
+                flush();
+                cur_style = save;
+                i = end + 1;
+                continue;
+            }
+        }
+
+        // Bold: **...**
+        if (c == '*' && i + 1 < n && cell[i + 1] == '*') {
+            size_t end = cell.find("**", i + 2);
+            if (end != std::string::npos) {
+                const char* save = cur_style;
+                cur_style = kBold;
+                for (size_t j = i + 2; j < end; ++j) {
+                    if (cell[j] == ' ') flush();
+                    else cur += cell[j];
+                }
+                flush();
+                cur_style = save;
+                i = end + 2;
+                continue;
+            }
+        }
+
+        // Italic: *...* (single star, not **)
+        if (c == '*' && (i + 1 >= n || cell[i + 1] != '*')) {
+            size_t end = i + 1;
+            while (end < n) {
+                if (cell[end] == '*' && (end + 1 >= n || cell[end + 1] != '*')) break;
+                ++end;
+            }
+            if (end < n) {
+                const char* save = cur_style;
+                cur_style = kItalic;
+                for (size_t j = i + 1; j < end; ++j) {
+                    if (cell[j] == ' ') flush();
+                    else cur += cell[j];
+                }
+                flush();
+                cur_style = save;
+                i = end + 1;
+                continue;
+            }
+        }
+
+        if (c == ' ') flush();
+        else cur += c;
+        ++i;
+    }
+    flush();
+    return words;
+}
+
+// Wrap a cell (with inline Markdown) into lines each at most `max_cols`
+// visible columns. Styled words survive the wrap: each emitted line carries
+// the ANSI codes for the words it contains, so a **bold** word that is
+// hard-broken is bold on both parts. Breaks at spaces; a single word wider
+// than the width is hard-broken (continuation flush-left).
+std::vector<std::string> wrap_inline(const std::string& cell, size_t max_cols) {
+    std::vector<std::string> lines;
+    if (max_cols == 0) return lines;
+
+    // Break a single word wider than max_cols into chunks that each fit.
+    // If the word is styled, each chunk is wrapped in its style.
+    auto hard_break = [&](const StyledWord& w) {
+        const unsigned char* p   = reinterpret_cast<const unsigned char*>(w.text.data());
+        const unsigned char* end = p + w.text.size();
+        std::string chunk;
+        size_t width = 0;
+        while (p < end) {
+            unsigned char b = *p;
+            int bytes = 1;
+            if      ((b & 0xE0) == 0xC0) bytes = 2;
+            else if ((b & 0xF0) == 0xE0) bytes = 3;
+            else if ((b & 0xF8) == 0xF0) bytes = 4;
+            uint32_t cp = b;
+            for (int j = 1; j < bytes && p + j < end; ++j)
+                cp = (cp << 6) | (p[j] & 0x3F);
+            size_t cw = is_wide(cp) ? 2 : 1;
+            if (width + cw > max_cols && !chunk.empty()) {
+                if (*w.style) lines.push_back(std::string(w.style) + chunk + kReset);
+                else          lines.push_back(chunk);
+                chunk.clear();
+                width = 0;
+            }
+            chunk.append(reinterpret_cast<const char*>(p), bytes);
+            width += cw;
+            p += bytes;
+        }
+        if (!chunk.empty()) {
+            if (*w.style) lines.push_back(std::string(w.style) + chunk + kReset);
+            else          lines.push_back(chunk);
+        }
+    };
+
+    const auto words = tokenize_styled(cell);
+    std::string line;
+    size_t line_w = 0;
+
+    auto flush_line = [&]() {
+        if (!line.empty()) { lines.push_back(line); line.clear(); line_w = 0; }
+    };
+
+    for (const auto& w : words) {
+        if (w.width <= max_cols) {
+            const std::string rendered =
+                *w.style ? std::string(w.style) + w.text + kReset : w.text;
+            if (line.empty()) {
+                line = rendered;
+                line_w = w.width;
+            } else if (line_w + 1 + w.width <= max_cols) {
+                line += " " + rendered;
+                line_w += 1 + w.width;
+            } else {
+                flush_line();
+                line   = rendered;
+                line_w = w.width;
+            }
+        } else {
+            flush_line();
+            hard_break(w);
+        }
+    }
+    if (!line.empty()) lines.push_back(line);
+    return lines;
+}
+
+// Render a collected table (header row + data rows) into out. Columns are
+// padded to uniform width per column; cells wider than their column wrap onto
+// continuation lines (keeping inline Markdown styling) rather than being
+// clipped. `max_width` is the maximum total table width in visible columns
+// (the terminal width, or a smaller width in tests).
 void render_table(std::string& out,
                   const std::vector<std::string>& header,
-                  const std::vector<std::vector<std::string>>& rows) {
-    // Compute column widths in visible terminal columns.
-    // We strip Markdown syntax markers first (** * ` etc.) because those
-    // characters are consumed by render_inline() and never reach the terminal,
-    // so counting them would over-estimate the cell width and break alignment.
-    // display_width() then handles multi-byte / wide (CJK, emoji) glyphs.
+                  const std::vector<std::vector<std::string>>& rows,
+                  size_t max_width) {
+    if (header.empty()) return;
     const size_t ncols = header.size();
-    std::vector<size_t> widths(ncols, 0);
-    for (size_t c = 0; c < ncols; ++c)
-        widths[c] = display_width(strip_inline_markers(header[c]));
-    for (const auto& row : rows)
-        for (size_t c = 0; c < row.size() && c < ncols; ++c)
-            widths[c] = std::max(widths[c], display_width(strip_inline_markers(row[c])));
 
-    // Shrink column widths so the table fits within the terminal.
-    // Total rendered width = 1 (left border) + ncols * (1 space + width + 1 space)
-    //                      + ncols * 1 (separator/right border) = 1 + ncols*(width+3)
-    // We repeatedly shave one column from the widest until we fit, with a floor
-    // of 1 column per cell so every column remains at least minimally visible.
-    const size_t term_w = terminal_width();
+    // Column width is the widest cell in that column. We strip the Markdown
+    // markers first (** * ` etc.) because those characters are consumed by
+    // the inline pass and never reach the terminal, so counting them would
+    // over-estimate the width and break alignment. display_width() handles
+    // multi-byte / wide (CJK, emoji) glyphs.
+    std::vector<size_t> widths(ncols, 0);
+    auto col_w = [&](const std::vector<std::string>& cells, size_t c) {
+        return c < cells.size() ? display_width(strip_inline_markers(cells[c])) : size_t{0};
+    };
+    for (size_t c = 0; c < ncols; ++c) widths[c] = col_w(header, c);
+    for (const auto& row : rows)
+        for (size_t c = 0; c < ncols; ++c) widths[c] = std::max(widths[c], col_w(row, c));
+
+    // The table renders as: 1 (left border) + ncols * (column + 3), where the
+    // +3 is "space + right padding column" -- a left/right space and a
+    // separator border on each side of the cell.
     auto table_w = [&]() -> size_t {
-        size_t w = 1; // left border
-        for (size_t c = 0; c < ncols; ++c) w += widths[c] + 3; // space + cell + space + separator
+        size_t w = 1;
+        for (size_t c = 0; c < ncols; ++c) w += widths[c] + 3;
         return w;
     };
-    while (table_w() > term_w) {
-        // Find the widest column that still has room to shrink.
-        size_t worst = 0;
-        for (size_t c = 1; c < ncols; ++c)
-            if (widths[c] > widths[worst]) worst = c;
-        if (widths[worst] <= 1) break; // can't shrink any further
-        --widths[worst];
+
+    // When the natural column widths overflow `max_width`, redistribute the
+    // available space equally across columns (floor 1 each) so the table
+    // always fits. Cells are then wrapped into the (narrower) column width.
+    if (table_w() > max_width) {
+        const size_t total_avail =
+            max_width > ncols * 4 + 1 ? max_width - 1 - ncols * 3 : ncols;
+        const size_t per_col = total_avail / ncols;
+        for (size_t c = 0; c < ncols; ++c) widths[c] = std::max(per_col, size_t{1});
     }
 
-    // Helper: emit one row, padding each cell to its column width.
-    auto emit_row = [&](const std::vector<std::string>& cells, bool is_header) {
-        out += kDim;
-        out += "│";
-        out += kReset;
+    // A wrapped cell: one emitted line per visual row, each carrying its own
+    // ANSI styling (see wrap_inline).
+    struct Cell { std::vector<std::string> lines; };
+
+    auto wrap_cells = [&](const std::vector<std::string>& cells) {
+        std::vector<Cell> wrapped;
         for (size_t c = 0; c < ncols; ++c) {
-            const std::string& cell = c < cells.size() ? cells[c] : "";
-            // Clip the raw cell to the (possibly reduced) column width before
-            // rendering inline Markdown, so the ANSI sequences wrap the clipped text.
-            size_t clipped_w = 0;
-            std::string clipped = clip_cell(strip_inline_markers(cell), widths[c], clipped_w);
-            // Re-apply inline markup only if no clipping occurred (clipped content
-            // would have its markers split mid-span). When clipping is needed the
-            // plain stripped text with an ellipsis is clear enough.
-            std::string rendered = (clipped_w == display_width(strip_inline_markers(cell)))
-                ? render_inline(cell)
-                : clipped;
-            if (is_header)
-                out += std::string(" ") + kBold + rendered + kReset;
-            else
-                out += " " + rendered;
-            // Pad to column width using the clipped visible width.
-            if (clipped_w < widths[c])
-                out.append(widths[c] - clipped_w, ' ');
-            out += " ";
+            // A row shorter than the header leaves a missing cell, rendered empty.
+            const std::string raw = (c < cells.size()) ? cells[c] : std::string{};
+            Cell cl;
+            cl.lines = wrap_inline(raw, widths[c]);
+            if (cl.lines.empty()) cl.lines.push_back("");
+            wrapped.push_back(std::move(cl));
+        }
+        return wrapped;
+    };
+
+    // Emit the wrapped rows of one table row (header or data) aligned in a
+    // grid: the row occupies as many lines as its tallest cell.
+    auto emit_grid = [&](const std::vector<Cell>& wrapped, bool is_header) {
+        size_t nlines = 1;
+        for (const auto& cl : wrapped) nlines = std::max(nlines, cl.lines.size());
+        for (size_t ln = 0; ln < nlines; ++ln) {
             out += kDim;
             out += "│";
             out += kReset;
+            for (size_t c = 0; c < ncols; ++c) {
+                const std::string& text =
+                    (ln < wrapped[c].lines.size()) ? wrapped[c].lines[ln] : "";
+                if (is_header && ln == 0)
+                    out += std::string(" ") + kBold + text + kReset;
+                else
+                    out += " " + text;
+                const size_t tw = visible_width(text);
+                if (tw < widths[c]) out.append(widths[c] - tw, ' ');
+                out += std::string(" ") + kDim + "│" + kReset;
+            }
+            out += "\n";
         }
-        out += "\n";
     };
 
-    // Helper: emit a horizontal divider.
-    auto emit_divider = [&](bool heavy) {
+    // A horizontal divider. `heavy` picks the left corner: "├" under the
+    // header, "┼" between data rows (matching the vertical grid lines).
+    auto emit_sep = [&](bool heavy) {
         out += kDim;
         out += heavy ? "├" : "┼";
         for (size_t c = 0; c < ncols; ++c) {
             for (size_t k = 0; k < widths[c] + 2; ++k) out += "─";
-            out += (c + 1 < ncols) ? "┼" : (heavy ? "┤" : "┤");
+            out += (c + 1 < ncols) ? "┼" : "┤";
         }
         out += kReset;
         out += "\n";
@@ -495,14 +673,11 @@ void render_table(std::string& out,
     out += kReset;
     out += "\n";
 
-    // Header row + divider.
-    emit_row(header, true);
-    emit_divider(true);
-
-    // Data rows.
+    emit_grid(wrap_cells(header), true);
+    emit_sep(/*heavy=*/true);
     for (size_t r = 0; r < rows.size(); ++r) {
-        emit_row(rows[r], false);
-        if (r + 1 < rows.size()) emit_divider(false);
+        emit_grid(wrap_cells(rows[r]), false);
+        if (r + 1 < rows.size()) emit_sep(/*heavy=*/false);
     }
 
     // Bottom border.
@@ -520,7 +695,11 @@ void render_table(std::string& out,
 
 // --- Block-level rendering --------------------------------------------------
 
-std::string render_markdown(const std::string& text) {
+// Internal implementation: renders Markdown text to ANSI-styled output,
+// wrapping tables so the rendered width never exceeds `max_width` visible
+// columns. The public wrapper tapto::ui::render_markdown (see termui.h)
+// supplies the terminal width and calls this.
+std::string render_markdown_impl(const std::string& text, size_t max_width) {
     std::string out;
     out.reserve(text.size() * 2);
 
@@ -547,7 +726,7 @@ std::string render_markdown(const std::string& text) {
     auto flush_table = [&]() {
         if (!in_table) return;
         if (!table_header.empty())
-            render_table(out, table_header, table_rows);
+            render_table(out, table_header, table_rows, max_width);
         in_table = false;
         table_header.clear();
         table_rows.clear();
@@ -699,6 +878,18 @@ std::string iteration_prefix(int iteration, int max_iterations) {
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
+// Markdown (public)
+// ---------------------------------------------------------------------------
+
+// Render Markdown to ANSI-styled output, wrapping tables so they fit the
+// terminal's current width. Pure function (no side effects): returns the
+// rendered string for the caller to emit. Tests call the same code path
+// through this entry point.
+std::string render_markdown(const std::string& text, size_t max_width) {
+    return render_markdown_impl(text, max_width);
+}
+
+// ---------------------------------------------------------------------------
 // Progress / status line
 // ---------------------------------------------------------------------------
 
@@ -746,7 +937,7 @@ void emit_intermediate(const std::string& text, bool is_reasoning, bool print_co
 }
 
 void print_reply(const std::string& text) {
-    std::cout << render_markdown(text) << "\n";
+    std::cout << render_markdown_impl(text, terminal_width()) << "\n";
 }
 
 void print_transcript(const std::vector<TranscriptEntry>& entries, const std::string& after) {
@@ -777,7 +968,7 @@ void print_transcript(const std::vector<TranscriptEntry>& entries, const std::st
             break;
         }
         case TranscriptEntry::Who::Model: {
-            std::istringstream in(render_markdown(e.text));
+            std::istringstream in(render_markdown_impl(e.text, cols));
             std::string l;
             while (std::getline(in, l)) block.push_back(l);
             while (!block.empty() && visible_width(block.back()) == 0) block.pop_back();

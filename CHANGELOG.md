@@ -46,6 +46,13 @@ breaking changes and the patch number everything else.)
 
 ## [Unreleased]
 
+### Fixed
+
+- A table the model returned that was wider than your terminal had its rows
+  cut off with a `…` where they did not fit, so part of each cell was missing.
+  The table now wraps onto extra lines so every cell shows in full, and the
+  bold and code formatting inside a cell is kept.
+
 ## [1.2.0] — 2026-10-20
 
 ### Added

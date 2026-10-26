@@ -346,8 +346,7 @@ const std::vector<uint8_t>& own_signer(std::string& error) {
             return h;
         }
         if (!signer_hash(path, nullptr, h, own_error)) {
-            mclog("[plugins] tapto-code itself: " + own_error + "
-");
+            mclog("[plugins] tapto-code itself: " + own_error + "\n");
             own_error = "this tapto-code build is not signed, so it loads no plugin "
                         "(a Debug build loads unsigned ones)";
         }

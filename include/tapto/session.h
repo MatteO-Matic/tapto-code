@@ -30,6 +30,11 @@ struct SavedSession {
         bool writable = false;
     };
     std::vector<Grant> folders; // /add-folder grants, the working directory not included
+    struct Plugin {
+        std::string name;
+        bool writable = false;
+    };
+    std::vector<Plugin> plugins; // loaded plugins and their mode (tapto/plugins.h)
     // A prompt that was sent but whose turn never finished. The history does
     // not contain it, so it is shown on resume for the user to send again.
     std::string pending_prompt;

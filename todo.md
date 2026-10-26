@@ -285,8 +285,19 @@ interface ITaptoHost : public IBase {
     virtual SRESULT SCOM_CALL WriteTemp(const uint8_t* data, size_t size,
                                         const char* name_hint,
                                         char*& label_path_out) = 0;
+    // Attach a PNG to the result of the call in progress, for a model that
+    // can see. The host checks the signature, reads width and height from
+    // IHDR itself and caps the size; a null `label` is the display path of
+    // the call's x-tapto-path argument.
+    virtual SRESULT SCOM_CALL AttachImage(const uint8_t* png, size_t size,
+                                          const char* label) = 0;
 };
 ```
+
+`IsCancelled`, `WriteTemp` and `AttachImage` act on the call in progress:
+the host keeps the `Context` of the current `CallTool` and refuses them
+outside one. `AttachImage` ends in `tapto::putToolImage`, so the backends
+attach it in each provider's shape as they do for core tools.
 
 A new capability is a new interface (`ITaptoPlugin2`) found by
 QueryInterface, so old plugins load in new hosts and the other way round.
@@ -453,15 +464,55 @@ have:
   functions (`ITaptoHost` allocates), and not the IPC error codes and typeinfo that belong to clcom's larger
   design stay behind.
 
+## First plugin: `image` (read_image out of the core)
+
+Decided 26 Oct. `read_image` (85a5b2f) leaves the core before it is ever
+released: not every server can see, and an image tool offered to one that
+cannot is noise. It goes first, before Jira, since it needs no network, no
+secrets and no rw, so it exercises the loader, `Describe`, `x-tapto-path`,
+the tool-name rule and the prompt alone; Jira then adds config, secrets, rw.
+
+- Source in `tapto-code/plugins/image/`, built by the same CMake (stb moves
+  there with it), installed to `<install>/plugins/`, in the tapto-code MSI.
+- Its tool is `image_read` (the tool-name rule), its `path` marked
+  `"x-tapto-path": "read"`; the PNG goes back through `AttachImage`.
+- The editor's binary-file hint ("Use the read_image tool") goes from the
+  core; the plugin's `Describe.prompt` tells the model to use `image_read`
+  for image files, so the hint exists only while the plugin is loaded.
+- Vision users turn it on with `/add-plugin image` or `plugins = image:ro`.
+- Signature check: Release builds always verify; Debug builds load an
+  unsigned plugin and say so in the trace log.
+
 ## Order of work
 
-- [ ] libtapto: `scom.h` (vendored, header-only); `tapto/plugin.h` with
+- [x] libtapto: `scom.h` (vendored, header-only); `tapto/plugin.h` with
       `TaptoString`; a test plugin built in-tree and a test that loads it,
       calls it, and unloads it through both paths, and whose debug host
-      refuses to free a string it did not allocate.
-- [ ] tapto-code: the loader (install-dir only, signature check), ro/rw
-      filtering, tool-name rule, secrets and config keys, the three commands,
-      the policy keys and ADMX, plugins in `session.json`.
+      refuses to free a string it did not allocate. libtapto `v0.4.0`.
+- [x] tapto-code: the loader (`src/plugins.cpp`): `<exe dir>/plugins/` only;
+      on Windows Release the module must be signed by the certificate that
+      signed tapto-code.exe (an unsigned build loads none), held open
+      deny-write from WinVerifyTrust through `LoadLibraryExW`; ro/rw
+      filtering; the tool-name rule; `x-tapto-path` resolved by the host and
+      stripped from the schema (Gemini refuses unknown keywords); overflow on
+      every result; secret config keys resolved for `Configure`; `/add-plugin`,
+      `/list-plugins`, `/remove-plugin`; `plugins =` in config; the policy
+      keys and ADMX; plugins in `session.json`. Tested with
+      `tests/plugin/probe.cpp`.
+- [ ] Loader follow-ups:
+      - `config set` accepting a plugin's declared keys. It runs without
+        loading plugins, so it needs the keys from somewhere: Describe the
+        installed modules (loads code to set a key), or a manifest beside
+        each module (`jira.json`). Needed by Jira, not by image.
+      - Plugin folders (`folders` in Describe, `@<plugin>` labels): logged
+        and ignored for now. Needed by the memory plugin.
+      - The signed path is untested: needs a build signed with the eToken.
+      - Linux: where the .deb/.rpm puts plugins (`<exe dir>/plugins` today,
+        so `/usr/bin/plugins`, which is wrong); `/usr/lib/tapto-code/plugins`.
+      - plugin.h should say that strings are UTF-8, paths included (the
+        host passes `u8string()`), and that no exception may leave a call.
+- [ ] `image` plugin: `read_image` moved out of `tools.cpp` into
+      `plugins/image/`, the core tool and stb removed (see above).
 - [ ] `jira.dll`: tapto-jira's `jira.cpp` behind `ITaptoPlugin`, its read
       tools ro and create/update/comment/transition rw.
 - [ ] Installer: `plugins\` in the MSI, the plugin signed in

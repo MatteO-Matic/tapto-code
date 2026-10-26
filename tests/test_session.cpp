@@ -73,6 +73,8 @@ int main() {
         s.model = "Qwen3-VL-30B";
         s.folders.push_back({"C:/proj/libfoo", false});
         s.folders.push_back({"C:/proj/libbar", true});
+        s.plugins.push_back({"image", false});
+        s.plugins.push_back({"jira", true});
         s.pending_prompt = "fix the build\nplease";
         s.history = json::array({
             {{"role", "user"}, {"content", "hello \xE2\x80\x94 world"}},
@@ -93,6 +95,9 @@ int main() {
             CHECK_EQ(back->pending_prompt, "fix the build\nplease");
             CHECK_EQ(back->history.dump(), s.history.dump());
             CHECK_TRUE(back->folders.size() == 2);
+            CHECK_TRUE(back->plugins.size() == 2 && back->plugins[0].name == "image" &&
+                       !back->plugins[0].writable && back->plugins[1].name == "jira" &&
+                       back->plugins[1].writable);
             if (back->folders.size() == 2) {
                 CHECK_EQ(back->folders[1].path, "C:/proj/libbar");
                 CHECK_TRUE(!back->folders[0].writable);

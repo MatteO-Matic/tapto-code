@@ -2275,6 +2275,22 @@ void set_granted_folders(const FolderSet* folders) {
     g_folders = folders;
 }
 
+bool resolve_plugin_path(const std::string& input, bool write, fs::path& out,
+                         std::string& display, std::string& error) {
+    if (write) {
+        // A command's %p rules: rw grants, and refuse_protected_write without
+        // the editor's @memory exception.
+        if (!resolve_in_sandbox(input, out, error, fs::path(), Scope::Write)) return false;
+        if (refuse_protected_write(out, input, error)) return false;
+    } else if (!resolve_for_read(input, out, error)) {
+        return false;
+    }
+    display = input;
+    if (g_folders && !is_under(sandbox_root(), out) && g_folders->owner(out))
+        display = g_folders->display(out);
+    return true;
+}
+
 std::vector<ToolSpec> builtin_tools() {
     std::vector<ToolSpec> tools;
 

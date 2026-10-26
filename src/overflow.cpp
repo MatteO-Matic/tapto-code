@@ -197,4 +197,29 @@ std::string overflow(const std::string& text, const std::string& name_hint) {
     return result;
 }
 
+std::string write_temp_file(const std::string& data, const std::string& name_hint,
+                            std::string& error) {
+    if (g_overflow_dir.empty()) {
+        error = "this session has no @tmp folder";
+        return {};
+    }
+    // The hint's extension is kept, so the model (and its tools) can tell a
+    // .pdf from a .txt.
+    std::string stem = name_hint, ext;
+    if (const std::size_t dot = name_hint.find_last_of('.');
+        dot != std::string::npos && dot > 0 && dot + 1 < name_hint.size()) {
+        stem = name_hint.substr(0, dot);
+        ext = "." + safe_name(name_hint.substr(dot + 1)).substr(0, 8);
+    }
+    const std::string file = safe_name(stem) + "-" + random_hex(6) + ext;
+    std::ofstream out(g_overflow_dir / file, std::ios::binary | std::ios::trunc);
+    out.write(data.data(), static_cast<std::streamsize>(data.size()));
+    out.close();
+    if (!out) {
+        error = "cannot write " + (g_overflow_dir / file).string();
+        return {};
+    }
+    return g_overflow_label + "/" + file;
+}
+
 } // namespace tapto

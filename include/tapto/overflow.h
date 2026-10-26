@@ -55,4 +55,11 @@ void set_overflow_folder(const std::filesystem::path& dir, const std::string& la
 // written, the cut lines are dropped and the note says so.
 std::string overflow(const std::string& text, const std::string& name_hint);
 
+// Write `data` to a new file in the overflow folder for the model to read (a
+// plugin's downloaded attachment), named after `name_hint` with a random part
+// so no two collide. Returns the label path ("@tmp/<name>"), or empty and
+// `error` when there is no folder or the file cannot be written.
+std::string write_temp_file(const std::string& data, const std::string& name_hint,
+                            std::string& error);
+
 } // namespace tapto

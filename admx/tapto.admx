@@ -42,6 +42,9 @@
     <category name="Commands" displayName="$(string.Commands)">
       <parentCategory ref="Tapto" />
     </category>
+    <category name="Plugins" displayName="$(string.Plugins)">
+      <parentCategory ref="Tapto" />
+    </category>
   </categories>
 
   <policies>
@@ -145,6 +148,38 @@
       <elements>
         <text id="ScriptFolder_Path" valueName="script-folder" required="true" />
       </elements>
+    </policy>
+
+    <!-- plugins = image:ro, jira:rw -->
+    <policy name="LoadedPlugins" class="Both" displayName="$(string.LoadedPlugins)"
+            explainText="$(string.LoadedPlugins_Explain)" presentation="$(presentation.LoadedPlugins)"
+            key="SOFTWARE\Policies\Centlake\tapto">
+      <parentCategory ref="Plugins" />
+      <supportedOn ref="windows:SUPPORTED_Windows7" />
+      <elements>
+        <text id="LoadedPlugins_Value" valueName="plugins" />
+      </elements>
+    </policy>
+
+    <!-- allowed-plugins = a, b, c -->
+    <policy name="AllowedPlugins" class="Both" displayName="$(string.AllowedPlugins)"
+            explainText="$(string.AllowedPlugins_Explain)" presentation="$(presentation.AllowedPlugins)"
+            key="SOFTWARE\Policies\Centlake\tapto">
+      <parentCategory ref="Plugins" />
+      <supportedOn ref="windows:SUPPORTED_Windows7" />
+      <elements>
+        <list id="AllowedPlugins_List" key="SOFTWARE\Policies\Centlake\tapto\allowed-plugins" valuePrefix="" />
+      </elements>
+    </policy>
+
+    <!-- allow-user-plugins = 1 | 0 -->
+    <policy name="AllowUserPlugins" class="Both" displayName="$(string.AllowUserPlugins)"
+            explainText="$(string.AllowUserPlugins_Explain)"
+            key="SOFTWARE\Policies\Centlake\tapto" valueName="allow-user-plugins">
+      <parentCategory ref="Plugins" />
+      <supportedOn ref="windows:SUPPORTED_Windows7" />
+      <enabledValue><decimal value="1" /></enabledValue>
+      <disabledValue><decimal value="0" /></disabledValue>
     </policy>
 
     <!-- Any other key = value the programs read: trace-file, system-prompt(-file),

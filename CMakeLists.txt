@@ -30,7 +30,7 @@ endif()
 # on MSVC, so a warning it trips here is fixed in the library and released.
 set(LIBTAPTO_BUILD_TESTS ON CACHE BOOL "" FORCE)
 include(FetchContent)
-set(LIBTAPTO_TAG "v0.3.0" CACHE STRING "libtapto version to build against")
+set(LIBTAPTO_TAG "v0.4.0" CACHE STRING "libtapto version to build against")
 FetchContent_Declare(libtapto
   GIT_REPOSITORY https://github.com/centlakestefan/libtapto.git
   GIT_TAG        ${LIBTAPTO_TAG}
@@ -105,6 +105,7 @@ add_executable(tapto-code
   src/commands.cpp
   src/memory.cpp
   src/overflow.cpp
+  src/plugins.cpp
   src/prompt.cpp
   src/session.cpp
   src/tools.cpp
@@ -115,6 +116,13 @@ add_dependencies(tapto-code tapto_version)
 # The library exports nlohmann_json, httplib, OpenSSL, Threads and, on Windows,
 # advapi32/crypt32, together with CPPHTTPLIB_OPENSSL_SUPPORT.
 target_link_libraries(tapto-code PRIVATE tapto::tapto stb_headers)
+# The plugin loader checks a module's Authenticode signature (WinVerifyTrust)
+# on Windows, and loads it with dlopen elsewhere.
+if(WIN32)
+  target_link_libraries(tapto-code PRIVATE wintrust)
+else()
+  target_link_libraries(tapto-code PRIVATE ${CMAKE_DL_LIBS})
+endif()
 tapto_code_warnings(tapto-code)
 
 install(TARGETS tapto-code RUNTIME DESTINATION bin)
@@ -216,6 +224,42 @@ target_link_libraries(test-overflow PRIVATE tapto::tapto stb_headers)
 tapto_code_warnings(test-overflow)
 
 add_test(NAME overflow COMMAND test-overflow)
+
+# The plugin loader (src/plugins.cpp) with a real module: tests/plugin/probe.cpp,
+# built as it is and with a misnamed tool. A plugin links only libtapto's
+# headers (tapto/plugin.h, tapto/scom.h), never the library. The test loads
+# modules built moments ago, so it compiles the loader without the signature
+# check a Release build otherwise makes.
+foreach(_probe IN ITEMS probe probe-misnamed)
+  add_library(tapto-${_probe} MODULE tests/plugin/probe.cpp)
+  target_include_directories(tapto-${_probe} PRIVATE "${libtapto_SOURCE_DIR}/include")
+  set_target_properties(tapto-${_probe} PROPERTIES PREFIX "" CXX_VISIBILITY_PRESET hidden)
+  tapto_code_warnings(tapto-${_probe})
+endforeach()
+target_compile_definitions(tapto-probe-misnamed PRIVATE PROBE_BAD_NAME)
+
+add_executable(test-plugins
+  tests/test_plugins.cpp
+  src/plugins.cpp
+  src/tools.cpp
+  src/commands.cpp
+  src/memory.cpp
+  src/overflow.cpp
+  "${libtapto_SOURCE_DIR}/test/ui_null.cpp"
+)
+target_include_directories(test-plugins PRIVATE include)
+target_compile_definitions(test-plugins PRIVATE TAPTO_PLUGINS_ALLOW_UNSIGNED)
+target_link_libraries(test-plugins PRIVATE tapto::tapto stb_headers)
+if(WIN32)
+  target_link_libraries(test-plugins PRIVATE wintrust)
+else()
+  target_link_libraries(test-plugins PRIVATE ${CMAKE_DL_LIBS})
+endif()
+add_dependencies(test-plugins tapto-probe tapto-probe-misnamed)
+tapto_code_warnings(test-plugins)
+
+add_test(NAME plugins COMMAND test-plugins
+  $<TARGET_FILE:tapto-probe> $<TARGET_FILE:tapto-probe-misnamed>)
 
 # Markdown table rendering: wrapping (not clipping), alignment, inline styling
 # and CJK width are exercised at explicit widths via render_markdown (pure,

@@ -48,6 +48,13 @@ breaking changes and the patch number everything else.)
 
 ### Added
 
+- Plugins: tools beyond the core, installed in the `plugins` folder beside
+  tapto-code. `/add-plugin <name>` gives the model a plugin's tools that only
+  read, `/add-plugin <name> rw` also those that change things, and
+  `/list-plugins` and `/remove-plugin <name>` show and take them away.
+  `plugins = image:ro, jira:rw` in the config loads them at every start, and
+  `/resume` brings back a session's plugins. Administrators can limit them with
+  the `allowed-plugins` and `allow-user-plugins` policies.
 - `command add --note "..."` and `/add-command <name> <cmd> --note "..."`
   attach a short instruction to a command — which arguments it expects, or
   what to pass them. The note is shown to the model alongside the command and

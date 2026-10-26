@@ -51,6 +51,12 @@ std::string save_session(const fs::path& path, SavedSession s) {
     for (const auto& g : s.folders) {
         j["folders"].push_back({{"path", g.path}, {"writable", g.writable}});
     }
+    if (!s.plugins.empty()) {
+        j["plugins"] = json::array();
+        for (const auto& p : s.plugins) {
+            j["plugins"].push_back({{"name", p.name}, {"writable", p.writable}});
+        }
+    }
     if (!s.pending_prompt.empty()) j["pending_prompt"] = s.pending_prompt;
     j["history"] = std::move(s.history);
 
@@ -120,6 +126,11 @@ std::optional<SavedSession> load_session(const fs::path& path, std::string& erro
         if (j.contains("folders") && j["folders"].is_array()) {
             for (const auto& f : j["folders"]) {
                 s.folders.push_back({f.value("path", ""), f.value("writable", false)});
+            }
+        }
+        if (j.contains("plugins") && j["plugins"].is_array()) {
+            for (const auto& p : j["plugins"]) {
+                s.plugins.push_back({p.value("name", ""), p.value("writable", false)});
             }
         }
     } catch (const json::exception&) {

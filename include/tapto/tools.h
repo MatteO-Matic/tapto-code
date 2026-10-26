@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -31,5 +32,17 @@ void set_granted_folders(const FolderSet* folders);
 // take precedence over user allow-listed commands, so the names can't be
 // reused for a user command.
 bool is_builtin_command(const std::string& name);
+
+// Resolve a path argument of a plugin tool (a schema property marked
+// "x-tapto-path"), so no plugin applies the path rules itself. `write` false
+// reads as the editor reads: the working directory and every folder in the
+// set. `write` true writes as a command's %p does: the working directory and
+// the rw grants, never a git directory or ~/.tapto, and not @memory, which
+// only the editor writes. On success `out` is the checked absolute path and
+// `display` the path as tool results print it ("<label>/<rest>" in a
+// granted folder, else the model's own spelling); on failure `error` is the
+// tool result to return.
+bool resolve_plugin_path(const std::string& input, bool write, std::filesystem::path& out,
+                         std::string& display, std::string& error);
 
 } // namespace tapto

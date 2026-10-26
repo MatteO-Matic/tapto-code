@@ -147,13 +147,15 @@ the default provider, a `work` provider block, request limits, the
 restrictions below, the command allow-list and script folder, and a free-form name/value list for
 every other key.
 
-Four keys exist only as policy:
+Six keys exist only as policy:
 
 ```
 allowed-providers = work, review    # the only names --provider or `provider =` may use
 allow-user-providers = 0            # only blocks the policy itself defines are usable
 allow-user-commands = 0             # only commands the policy defines may be run or added
 script-folder = D:\Tools\tapto     # the machine's script folder (an absolute path)
+allowed-plugins = image, jira       # the only plugins that may be loaded
+allow-user-plugins = 0              # only the plugins the policy's own `plugins` names
 ```
 
 Confinement holds only when the policy also fixes where a permitted block
@@ -284,6 +286,25 @@ again with a different mode changes the mode.
 
 A grant lasts for the session. The read-only commands exist in tapto-word too.
 
+**Plugins.** Tools beyond the core come as plugins: modules installed in the
+`plugins` folder beside `tapto-code.exe`, loaded only from there. Loading one
+gives the model its tools for the session:
+
+```
+/add-plugin jira          read-only: only the tools that read
+/add-plugin jira rw       also the tools that change things
+/list-plugins
+/remove-plugin jira
+```
+
+A plugin loaded read-only does not offer its writing tools at all; loading it
+again with `rw` adds them. Its tools are named `<plugin>_...`, and a path a
+tool takes goes through the same rules as the editor's before the plugin sees
+it, so a plugin reaches only what the model could reach anyway. `plugins =
+image:ro, jira:rw` in the config loads them at every start, and the plugins of
+a session come back with `/resume`. A Release build on Windows loads only a
+plugin signed with the certificate that signed tapto-code itself.
+
 **First run:** if no provider/api-key is configured, tapto-code prompts for them
 interactively and saves them to the global (`~/.tapto`) config, then starts
 the chat. You can also set them manually instead:
@@ -314,6 +335,7 @@ Chat config keys:
 | `system-prompt-append` | no | unset — added after the prompt, so project rules don't need a copy of the built-in one |
 | `system-prompt-append-file` | no | unset — same, from a text file; added after `system-prompt-append` |
 | `trace-file`    | no       | unset — set to a path to enable diagnostic logging  |
+| `plugins`       | no       | unset — plugins to load at every start, `name:ro` or `name:rw`, comma-separated |
 
 ### System prompt
 

@@ -7,6 +7,7 @@
 #include "tapto/memory.h"
 #include "tapto/overflow.h"
 #include "tapto/paths.h"
+#include "tapto/plugins.h"
 #include "tapto/policy.h"
 #include "tapto/prompt.h"
 #include "tapto/provider.h"
@@ -157,7 +158,10 @@ const char* kUsage =
     "and allow-list commands of its own (the 'commands' subkey, or\n"
     "/etc/tapto/policy-commands), listed by 'command list' as policy and\n"
     "defined above the user's; with\n"
-    "  allow-user-commands = 0             they are the only ones\n";
+    "  allow-user-commands = 0             they are the only ones\n"
+    "and confine plugins:\n"
+    "  allowed-plugins = image, jira       only these may be loaded\n"
+    "  allow-user-plugins = 0              only those its own 'plugins' names\n";
 
 struct Args {
     std::optional<Level> level;
@@ -202,7 +206,7 @@ bool is_supported_config_key(const std::string& key) {
         "max-output-tokens", "max-tool-iterations", "system-prompt", "system-prompt-file",
         "system-prompt-append", "system-prompt-append-file", "trace-file", "print-cot",
         "connection-timeout", "read-timeout",
-        "reasoning-effort",
+        "reasoning-effort", "plugins",
     };
     for (const char* k : kKeys) {
         if (key == k) return true;
@@ -217,7 +221,7 @@ const char* kSupportedKeysHelp =
     "provider, provider-url, model, api-key, "
     "max-output-tokens, max-tool-iterations, system-prompt, system-prompt-file, "
     "system-prompt-append, system-prompt-append-file, trace-file, print-cot, "
-    "connection-timeout, read-timeout, "
+    "connection-timeout, read-timeout, plugins (image:ro, jira:rw), "
     "and per provider <name>-provider-type, <name>-provider-url, <name>-model, "
     "<name>-api-key, <name>-reasoning-effort";
 
@@ -559,6 +563,36 @@ std::string list_folders_text(const FolderSet& folders) {
 }
 
 // Write a key to the global (user) config scope.
+// /list-plugins: what is loaded, in what mode, and what else is installed.
+std::string list_plugins_text(const Plugins& plugins) {
+    std::ostringstream out;
+    const auto loaded = plugins.loaded();
+    if (loaded.empty()) {
+        out << "No plugin is loaded.";
+    } else {
+        out << "Plugins loaded:";
+        for (const auto& e : loaded) {
+            out << "\n  " << e.name << (e.version.empty() ? "" : " " + e.version) << "  "
+                << (e.writable ? "rw" : "ro") << "  " << e.tools
+                << (e.tools == 1 ? " tool" : " tools");
+            if (e.write_tools)
+                out << ", " << e.write_tools << " that change things"
+                    << (e.writable ? "" : " (not offered)");
+        }
+    }
+    std::string rest;
+    for (const auto& n : available_plugins()) {
+        bool have = false;
+        for (const auto& e : loaded) have = have || e.name == n;
+        if (!have) rest += (rest.empty() ? "" : ", ") + n;
+    }
+    out << "\n" << (rest.empty() ? std::string("No other plugin is installed")
+                                 : "Installed, not loaded: " + rest)
+        << " (in " << plugin_directory().u8string() << ").";
+    if (!rest.empty()) out << " Load one with /add-plugin <name> [ro|rw].";
+    return out.str();
+}
+
 bool set_global(const std::string& key, const std::string& value) {
     if (is_policy_managed(key)) {
         ui::print_error("'" + key + "' is managed by your organization's policy and cannot be set");
@@ -1451,6 +1485,9 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
     // friends are on the table they read the project as well as the grants,
     // and /list-folders shows where tapto-code was started. It is not a grant:
     // no command removes it or makes it read-only.
+    // Declared before the context: the plugin tools in context.tools call into
+    // it, so it must outlive them.
+    Plugins plugins;
     Context context;
     FolderSet folders;
     {
@@ -1485,11 +1522,24 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
         ui::print_warning("no project memory this session: " + err);
     }
     set_granted_folders(&folders); // outlives the chat loop below
+    // The plugins the configuration asks for, `plugins = image:ro, jira:rw`.
+    // One the policy itself names loads even with allow-user-plugins = 0.
+    for (const auto& e : effective_config()) {
+        if (e.key != "plugins") continue;
+        std::string err;
+        for (const auto& [name, writable] : parse_plugin_list(e.value, err)) {
+            if (std::string why = plugins.add(name, writable, e.origin == Level::Policy);
+                !why.empty())
+                ui::print_warning("plugin not loaded: " + why);
+        }
+        if (!err.empty()) ui::print_warning("plugins = " + e.value + ": " + err);
+    }
     auto rebuild_tools_and_prompt = [&]() {
         context.tools = builtin_tools();
         if (folders.has_grants()) {
             for (auto& t : folder_tools(folders)) context.tools.push_back(std::move(t));
         }
+        for (auto& t : plugins.tools()) context.tools.push_back(std::move(t));
         std::string prompt = resolve_system_prompt();
         if (const std::string extra = folder_prompt(folders); !extra.empty()) {
             prompt += "\n\n" + extra;
@@ -1499,6 +1549,10 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
         // writes mid-session is picked up at the next rebuild.
         if (const std::string extra = has_memory ? memory_prompt() : std::string();
             !extra.empty()) {
+            prompt += "\n\n" + extra;
+        }
+        // What the plugins say of their tools, the changing part asked anew.
+        if (const std::string extra = plugins.prompt(); !extra.empty()) {
             prompt += "\n\n" + extra;
         }
         client->setSystemPrompt(prompt);
@@ -1545,6 +1599,7 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
         for (const auto& f : folders.folders()) {
             if (!f.home && !f.system) s.folders.push_back({f.root.string(), f.writable});
         }
+        for (const auto& p : plugins.loaded()) s.plugins.push_back({p.name, p.writable});
         s.pending_prompt = pending;
         s.history = client->getHistory();
         return s;
@@ -1584,6 +1639,15 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
             // A folder granted already keeps its mode on add; widen it to the
             // saved one, never narrow what the user has granted since.
             if (g.writable) folders.set_writable(label, true);
+        }
+        for (const auto& p : saved->plugins) {
+            // The same for a plugin: one loaded rw since stays rw.
+            bool rw = p.writable;
+            for (const auto& have : plugins.loaded()) {
+                if (have.name == p.name && have.writable) rw = true;
+            }
+            if (std::string why = plugins.add(p.name, rw); !why.empty())
+                ui::print_warning("plugin not loaded again: " + why);
         }
         rebuild_tools_and_prompt();
         // The conversation being replaced is set aside, not dropped: a second
@@ -2028,6 +2092,94 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
                            (folders.has_grants()
                                 ? "\n" + list_folders_text(folders)
                                 : std::string("The model reaches only the working directory now.")));
+            continue;
+        }
+
+        // Plugins: tools from the modules installed beside tapto-code
+        // (tapto/plugins.h), read-only unless rw, worded like the folders.
+        if (line == "/list-plugins") {
+            ui::print_line(list_plugins_text(plugins));
+            continue;
+        }
+        if (line.rfind("/add-plugin", 0) == 0 &&
+            (line.size() == 11 || line[11] == ' ' || line[11] == '\t')) {
+            std::istringstream iss(line.substr(11));
+            std::string name, mode, extra;
+            iss >> name >> mode >> extra;
+            std::transform(mode.begin(), mode.end(), mode.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (name.empty() || !(mode.empty() || mode == "ro" || mode == "rw") || !extra.empty()) {
+                ui::print_line("usage: /add-plugin <name> [ro|rw]   (read-only unless rw)\n\n" +
+                               list_plugins_text(plugins));
+                continue;
+            }
+            const bool writable = mode == "rw";
+            bool was_loaded = false, was_writable = false;
+            for (const auto& e : plugins.loaded()) {
+                if (e.name == name) {
+                    was_loaded = true;
+                    was_writable = e.writable;
+                }
+            }
+            if (std::string why = plugins.add(name, writable); !why.empty()) {
+                ui::print_error(why);
+                continue;
+            }
+            if (was_loaded && was_writable == writable) {
+                ui::print_line("'" + name + "' is loaded already (" +
+                               (writable ? "read-write" : "read-only") + ").");
+                continue;
+            }
+            rebuild_tools_and_prompt();
+            persist();
+            for (const auto& e : plugins.loaded()) {
+                if (e.name != name) continue;
+                const std::size_t offered = writable ? e.tools : e.tools - e.write_tools;
+                std::string tools;
+                for (const auto& t : context.tools) {
+                    if (t.name.rfind(name + "_", 0) == 0)
+                        tools += (tools.empty() ? "" : ", ") + t.name;
+                }
+                std::string msg = was_loaded
+                    ? "'" + name + "' is now " + (writable ? "read-write" : "read-only") + ": "
+                    : "Loaded plugin '" + name + "'" + (e.version.empty() ? "" : " " + e.version) +
+                          ", " + (writable ? "read-write" : "read-only") + ": ";
+                msg += std::to_string(offered) + (offered == 1 ? " tool" : " tools") +
+                       (tools.empty() ? std::string() : " (" + tools + ")") + ".";
+                if (!writable && e.write_tools) {
+                    msg += " Its " + std::to_string(e.write_tools) + " that change things " +
+                           (e.write_tools == 1 ? "is" : "are") + " not offered; /add-plugin " +
+                           name + " rw offers them.";
+                }
+                if (!was_loaded) msg += " Remove it with /remove-plugin " + name + ".";
+                ui::print_line(msg);
+            }
+            continue;
+        }
+        if (line.rfind("/remove-plugin", 0) == 0) {
+            const std::string name = trim(line.substr(std::string("/remove-plugin").size()));
+            if (name.empty()) {
+                ui::print_line("usage: /remove-plugin <name>\n\n" + list_plugins_text(plugins));
+                continue;
+            }
+            // Its tools leave the table before the plugin is shut down.
+            std::vector<ToolSpec> kept;
+            for (auto& t : context.tools) {
+                if (t.name.rfind(name + "_", 0) != 0) kept.push_back(std::move(t));
+            }
+            context.tools = std::move(kept);
+            bool unloaded = false;
+            if (!plugins.remove(name, &unloaded)) {
+                rebuild_tools_and_prompt();
+                ui::print_line("'" + name + "' is not loaded.\n\n" + list_plugins_text(plugins));
+                continue;
+            }
+            rebuild_tools_and_prompt();
+            persist();
+            ui::print_line("Removed plugin '" + name + "'; its tools are gone." +
+                           (unloaded ? std::string()
+                                     : std::string(" (Its module stays loaded until tapto-code "
+                                                   "exits.)")));
             continue;
         }
 

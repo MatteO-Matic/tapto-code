@@ -25,6 +25,7 @@ Makefile
 *.vcxproj.filters
 *.vcxproj.user
 *.sln
+CMakeSettings.json
 /build-ide/
 
 # Local store is now central (~/.tapto/projects); kept as a safety net so a

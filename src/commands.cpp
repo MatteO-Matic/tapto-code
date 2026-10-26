@@ -105,10 +105,13 @@ std::size_t note_start(const std::string& s) {
 }
 
 // A note is at the end of the stored value and never runs, so the command line
-// is what is before it: the program and its placeholders only.
+// is what is before it: the program and its placeholders only. The space
+// before the '#' is not part of the command line either, so it is trimmed.
 std::string command_line(const std::string& cmdline) {
     const std::size_t at = note_start(cmdline);
-    return at == std::string::npos ? cmdline : cmdline.substr(0, at);
+    std::string line = (at == std::string::npos) ? cmdline : cmdline.substr(0, at);
+    while (!line.empty() && (line.back() == ' ' || line.back() == '\t')) line.pop_back();
+    return line;
 }
 
 } // namespace

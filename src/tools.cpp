@@ -8,9 +8,11 @@
 #include "tapto/memory.h"
 #include "tapto/overflow.h"
 #include "tapto/policy.h"
+#include "tapto/tool_image.h"
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
@@ -35,6 +37,22 @@ extern char** environ;
 
 #include <nlohmann/json.hpp>
 
+// stb: the read_image tool decodes an image file and re-encodes it as PNG
+// before handing it to the backend. Both implementations are compiled into
+// this translation unit (the STB_*_IMPLEMENTATION guards make the headers
+// here emit the C code rather than just the declarations).
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4996) // stb_image_write.h uses sprintf internally
+#endif
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 
@@ -45,6 +63,25 @@ namespace {
 // The small helpers this file used to carry -- split_lines, read_file,
 // wildcard_match, is_noise_dir -- come from tapto/fstools.h now, so the glob
 // and the noise-directory list agree with the folder tools.
+
+// Image-file helpers, shared by the text editor (whose binary-file message
+// points an image at read_image) and the read_image tool itself.
+std::string image_ext(const std::string& name) {
+    const std::size_t dot = name.find_last_of('.');
+    if (dot == std::string::npos) return "";
+    std::string e = name.substr(dot + 1);
+    for (char& c : e) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return e;
+}
+bool image_ext_is(const std::string& name, const char* ext) {
+    return image_ext(name) == ext;
+}
+bool has_image_ext(const std::string& name) {
+    return image_ext_is(name, "png") || image_ext_is(name, "jpg") ||
+           image_ext_is(name, "jpeg") || image_ext_is(name, "webp") ||
+           image_ext_is(name, "bmp") || image_ext_is(name, "gif") ||
+           image_ext_is(name, "tga");
+}
 
 // --- line endings ---------------------------------------------------------
 //
@@ -539,8 +576,12 @@ std::string execute_text_editor(Context& /*context*/, const json& in) {
             // head and tail refuse the same way, so `view` must not be the way
             // around them.
             if (looks_binary(content)) {
-                return "ERROR: " + path.string() + " is a binary file (" +
-                       std::to_string(content.size()) + " bytes); it has no text to show.";
+                std::string msg = "ERROR: " + path.string() + " is a binary file (" +
+                                  std::to_string(content.size()) +
+                                  " bytes); it has no text to show.";
+                if (has_image_ext(path.filename().string()))
+                    msg += " Use the read_image tool to view it.";
+                return msg;
             }
             // content_lines, not split_lines: a trailing newline must not show
             // up as an extra empty numbered line, or `view` and `wc -l` disagree
@@ -874,6 +915,190 @@ std::string execute_find_files(Context& /*context*/, const json& in) {
         return out.str();
     } catch (const std::exception& e) {
         return std::string("ERROR: find_files failed: ") + e.what();
+    }
+}
+
+// --- image reading tool ----------------------------------------------------
+// An image file is binary, so the text tools refuse it, and a model that can
+// see needs another way in. The tool decodes the file, re-encodes it as PNG
+// (every provider takes PNG; it also normalises JPEG/WebP/BMP/... into one
+// shape) and hands the bytes to the backend through putToolImage, which the
+// backends in libtapto attach to the model's turn in the provider's shape
+// (an image block in a Claude tool_result, a following user message for
+// OpenAI and Gemini, whose tool-role messages are text-only).
+//
+// What the tool itself controls is size: a model's pixel budget is a fraction
+// of a megapixel, so the longest side is capped at kMaxImageSide (down-scaled
+// with a box filter rather than nearest-neighbour, which would leave jaggies
+// on a 4K screenshot), and a file whose *claimed* dimensions would allocate
+// several gigabytes before the cap could ever be applied is refused on
+// dimension rather than pixel — saying so rather than silently blowing up.
+// The provider may re-downscale on its own; what is sent is still smaller
+// than what the model needs to reason about.
+//
+// stb_image is a single-header decoder and stb_image_write a single-header
+// PNG encoder (both fetched in CMakeLists.txt); the implementations are
+// compiled into this translation unit, so no other file sees the stb C code.
+
+namespace {
+
+constexpr int kMaxImageSide = 1600;
+// A decode of a file that claims these dimensions would allocate several
+// gigabytes before the down-scale could apply. Refuse the dimensions, not
+// the pixels, and say so.
+constexpr int kMaxImageDim = 16384;
+
+// Average a rectangular block of `src` into one pixel. Box down-scale: each
+// destination pixel is the mean of the source pixels it maps over. `src` is
+// w*h*comp bytes, `dst` (filled) is out_w*out_h*comp. A box is always at least
+// one source pixel, so a no-op size still copies.
+bool box_downscale(const uint8_t* src, int w, int h, int comp,
+                   int out_w, int out_h, std::vector<uint8_t>& dst) {
+    dst.assign((std::size_t)out_w * out_h * comp, 0);
+    uint64_t acc[4] = {0, 0, 0, 0};
+    for (int oy = 0; oy < out_h; ++oy) {
+        const int y0 = oy * h / out_h;
+        int y1 = (oy + 1) * h / out_h;
+        if (y1 <= y0) y1 = y0 + 1;
+        for (int ox = 0; ox < out_w; ++ox) {
+            const int x0 = ox * w / out_w;
+            int x1 = (ox + 1) * w / out_w;
+            if (x1 <= x0) x1 = x0 + 1;
+            for (int c = 0; c < comp; ++c) acc[c] = 0;
+            uint64_t npix = 0;
+            for (int y = y0; y < y1; ++y) {
+                const uint8_t* row = src + ((std::size_t)y * w + x0) * comp;
+                for (int x = x0; x < x1; ++x) {
+                    for (int c = 0; c < comp; ++c) acc[c] += row[(std::size_t)(x - x0) * comp + c];
+                    ++npix;
+                }
+            }
+            uint8_t* d = dst.data() + ((std::size_t)oy * out_w + ox) * comp;
+            for (int c = 0; c < comp; ++c)
+                d[c] = (uint8_t)((acc[c] + npix / 2) / npix);
+        }
+    }
+    return true;
+}
+
+// stb_image_write has no write-to-memory API (only stbi_write_png to a file
+// and stbi_write_png_to_func via a callback), so this callback appends the
+// PNG bytes to a vector as the encoder emits them.
+void png_write_cb(void* context, void* data, int size) {
+    auto* out = static_cast<std::vector<uint8_t>*>(context);
+    out->insert(out->end(),
+                static_cast<const uint8_t*>(data),
+                static_cast<const uint8_t*>(data) + size);
+}
+
+// Encode a decoded image as a PNG into `out`. `px` is w×h with `comp`
+// channels (as stbi decoded it). When `downscale` is true the result is
+// box-rescaled so its longest side is kMaxImageSide; otherwise it is written
+// as-is. Returns false on any failure (leaving `out` empty); fills
+// `out_w`/`out_h` either way.
+bool png_encode(const uint8_t* px, int w, int h, int comp, bool downscale,
+                std::vector<uint8_t>& out, int& out_w, int& out_h) {
+    out_w = w;
+    out_h = h;
+    std::vector<uint8_t> scaled;
+    const uint8_t* data = px;
+    if (downscale) {
+        const double scale = static_cast<double>(kMaxImageSide) / std::max(w, h);
+        out_w = std::max(1, static_cast<int>(w * scale + 0.5));
+        out_h = std::max(1, static_cast<int>(h * scale + 0.5));
+        if (!box_downscale(px, w, h, comp, out_w, out_h, scaled)) return false;
+        data = scaled.data();
+    }
+    out.clear();
+    out.reserve((std::size_t)out_w * out_h * (std::size_t)comp * 3 / 2 + 4096);
+    // Tightly packed rows: stride = width * channels. Non-zero on success.
+    const int ok = stbi_write_png_to_func(png_write_cb, &out,
+                                          out_w, out_h, comp, data,
+                                          out_w * comp);
+    if (!ok) { out.clear(); return false; }
+    return !out.empty();
+}
+
+} // namespace
+
+std::string execute_read_image(Context& context, const json& in) {
+    try {
+        if (!in.contains("path")) return "ERROR: 'path' not present.";
+        const std::string input = in["path"].get<std::string>();
+        fs::path path;
+        {
+            std::string sandbox_err;
+            if (!resolve_for_read(input, path, sandbox_err)) return sandbox_err;
+        }
+        std::error_code ec;
+        if (!fs::exists(path, ec)) return "ERROR: Not found: " + input;
+        if (fs::is_directory(path, ec))
+            return "ERROR: '" + input + "' is a directory, not an image file.";
+
+        std::string raw;
+        if (!read_file(path, raw)) return "ERROR: Failed to read " + input;
+
+        int w = 0, h = 0, comp = 0;
+        stbi_uc* px = stbi_load_from_memory(
+            reinterpret_cast<const stbi_uc*>(raw.data()),
+            static_cast<int>(raw.size()), &w, &h, &comp, 0);
+        if (!px) {
+            const std::string what = has_image_ext(input)
+                ? "an image, but it could not be decoded (a corrupted or unusual variant?)"
+                : (looks_binary(raw)
+                       ? "binary, so it is not an image"
+                       : "not an image");
+            return "ERROR: " + input + " is " + what +
+                   ". Use the editor's 'view' (or the built-in cat/head) to read its text.";
+        }
+
+        // A file that claims dimensions past kMaxImageDim would allocate
+        // gigabytes before the down-scale could apply; refuse on dimension
+        // rather than pixel, and say so.
+        if (w > kMaxImageDim || h > kMaxImageDim) {
+            const std::string size = std::to_string(w) + "x" + std::to_string(h);
+            stbi_image_free(px);
+            return "ERROR: " + input + " is " + size + ", which read_image does not "
+                   "decode (its longest side must be at most " + std::to_string(kMaxImageDim) +
+                   " pixels). Downscale it first and try again.";
+        }
+
+        // The PNG encoder writes the image in its native channel count
+        // (comp); box_downscale averages per-channel, so no conversion is
+        // needed before or after the down-scale.
+        const bool downscale = std::max(w, h) > kMaxImageSide;
+        std::vector<uint8_t> png;
+        int out_w = w, out_h = h;
+        if (!png_encode(px, w, h, comp, downscale, png, out_w, out_h)) {
+            stbi_image_free(px);
+            return "ERROR: " + input + " decoded but could not be re-encoded as PNG.";
+        }
+        stbi_image_free(px);
+
+        // The label is the path as the model names it: "<label>/<relative>"
+        // for a path under a granted folder, its own spelling otherwise. It
+        // reads as "<label>: <attached image>" once a provider prefixes it.
+        std::string label = input;
+        if (g_folders) {
+            if (const Folder* f = g_folders->owner(path);
+                f && !is_under(sandbox_root(), path))
+                label = g_folders->display(path);
+        }
+
+        tapto::ToolImage image;
+        image.png = std::move(png);
+        image.width = out_w;
+        image.height = out_h;
+        image.label = std::move(label);
+        putToolImage(context, std::move(image));
+
+        std::ostringstream r;
+        r << "image attached: " << out_w << "x" << out_h << " PNG";
+        if (downscale)
+            r << " (down-scaled from " << w << "x" << h << ")";
+        return r.str();
+    } catch (const std::exception& e) {
+        return std::string("ERROR: read_image failed: ") + e.what();
     }
 }
 
@@ -2119,6 +2344,38 @@ std::vector<ToolSpec> builtin_tools() {
     find.executor = execute_find_files;
     find.display = display_find_files;
     tools.push_back(std::move(find));
+
+    // read_image: a vision-capable model cannot see what the text tools
+    // refuse, so this is the way in. The backend picks up the PNG the
+    // executor leaves in the context (tapto::putToolImage) and attaches it
+    // in the provider's shape; what the executor controls is the file
+    // boundary (sandbox, granted folders) and the size (down-scale, cap).
+    ToolSpec image;
+    image.name = "read_image";
+    image.description =
+        "Read an image file (PNG, JPEG, WebP, BMP, GIF, TGA) and attach it to "
+        "your reply for a vision-capable model to see. The image is normalised "
+        "to PNG, and its longest side is capped at 1600 pixels (down-scaled "
+        "when larger); images over 16384 pixels on a side are refused. Use it "
+        "when a file you want to look at is an image — the text tools "
+        "(view, cat, head) refuse binary files and point here. The path "
+        "resolves the same as the editor's: relative to the working directory, "
+        "or under a granted folder / @tmp / @memory.";
+    image.parameters = {
+        {"type", "object"},
+        {"properties", {
+            {"path", {{"type", "string"}, {"description", "Image file to read."}}},
+        }},
+        {"required", {"path"}},
+    };
+    image.executor = execute_read_image;
+    image.display = [](const json& in) -> std::string {
+        if (!in.is_object()) return std::string("read_image");
+        const std::string p = in.contains("path") && in["path"].is_string()
+                              ? in["path"].get<std::string>() : "";
+        return p.empty() ? std::string("read_image") : "View " + p;
+    };
+    tools.push_back(std::move(image));
 
     // list_commands: lets the model discover the allow-listed commands.
     ToolSpec list_cmds;

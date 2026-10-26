@@ -38,6 +38,33 @@ FetchContent_Declare(libtapto
 )
 FetchContent_MakeAvailable(libtapto)
 
+# stb: public-domain, header-only image decoding (stb_image) and PNG encoding
+# (stb_image_write), which the read_image tool uses to turn an image file into
+# the PNG it attaches for the model. The implementations are compiled into
+# src/tools.cpp by defining the STB_*_IMPLEMENTATION macros there; every target
+# that compiles tools.cpp gets this include directory.
+#
+# The stb repository has no tags (it releases by branch), so the version is
+# taken from `master`, the stable release line (`dev` holds work in progress).
+# It is pinned to a branch rather than a commit for now; if stb's master
+# advances in a way that breaks the build, pin a specific commit here instead.
+# The repo has no CMakeLists.txt, so it is populated rather than made
+# available -- the CMP0169 policy (CMake 3.31+) keeps the direct Populate call
+# from warning about itself.
+if(POLICY CMP0169)
+  cmake_policy(SET CMP0169 OLD)
+endif()
+FetchContent_Declare(stb
+  GIT_REPOSITORY https://github.com/nothings/stb.git
+  GIT_TAG        master
+)
+FetchContent_GetProperties(stb)
+if(NOT stb_POPULATED)
+  FetchContent_Populate(stb)
+endif()
+add_library(stb_headers INTERFACE)
+target_include_directories(stb_headers INTERFACE "${stb_SOURCE_DIR}")
+
 # --- Version stamp ----------------------------------------------------------
 # Puts the version and the originating commit into the binary, so `version` and
 # the first line of every trace name the build that produced them. Regenerated
@@ -87,7 +114,7 @@ target_include_directories(tapto-code PRIVATE include "${TAPTO_GENERATED_DIR}")
 add_dependencies(tapto-code tapto_version)
 # The library exports nlohmann_json, httplib, OpenSSL, Threads and, on Windows,
 # advapi32/crypt32, together with CPPHTTPLIB_OPENSSL_SUPPORT.
-target_link_libraries(tapto-code PRIVATE tapto::tapto)
+target_link_libraries(tapto-code PRIVATE tapto::tapto stb_headers)
 tapto_code_warnings(tapto-code)
 
 install(TARGETS tapto-code RUNTIME DESTINATION bin)
@@ -113,7 +140,7 @@ add_executable(test-edits
   "${libtapto_SOURCE_DIR}/test/ui_null.cpp"
 )
 target_include_directories(test-edits PRIVATE include)
-target_link_libraries(test-edits PRIVATE tapto::tapto)
+target_link_libraries(test-edits PRIVATE tapto::tapto stb_headers)
 tapto_code_warnings(test-edits)
 
 add_test(NAME edits COMMAND test-edits)
@@ -168,7 +195,7 @@ add_executable(test-memory
   "${libtapto_SOURCE_DIR}/test/ui_null.cpp"
 )
 target_include_directories(test-memory PRIVATE include)
-target_link_libraries(test-memory PRIVATE tapto::tapto)
+target_link_libraries(test-memory PRIVATE tapto::tapto stb_headers)
 tapto_code_warnings(test-memory)
 
 add_test(NAME memory COMMAND test-memory)
@@ -185,7 +212,7 @@ add_executable(test-overflow
   "${libtapto_SOURCE_DIR}/test/ui_null.cpp"
 )
 target_include_directories(test-overflow PRIVATE include)
-target_link_libraries(test-overflow PRIVATE tapto::tapto)
+target_link_libraries(test-overflow PRIVATE tapto::tapto stb_headers)
 tapto_code_warnings(test-overflow)
 
 add_test(NAME overflow COMMAND test-overflow)

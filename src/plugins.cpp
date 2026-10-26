@@ -44,9 +44,10 @@
 
 #include <nlohmann/json.hpp>
 
-// Release builds check a module's signature before loading it; Debug builds
-// and the tests, which load modules built moments ago, do not.
-#if defined(NDEBUG) && !defined(TAPTO_PLUGINS_ALLOW_UNSIGNED)
+// Release builds on Windows check a module's signature before loading it;
+// Debug builds and the tests, which load modules built moments ago, do not.
+// Elsewhere the root-owned install directory does that job (load_module).
+#if defined(_WIN32) && defined(NDEBUG) && !defined(TAPTO_PLUGINS_ALLOW_UNSIGNED)
 #  define TAPTO_PLUGINS_VERIFY 1
 #endif
 
@@ -588,23 +589,34 @@ std::string plugin_config(const Plugins::Loaded& l, std::string& error) {
 
 // --- the public side ---------------------------------------------------------------
 
+fs::path plugin_directory_for(const fs::path& exe) {
+    const fs::path dir = exe.parent_path();
+#ifndef _WIN32
+    // Installed, the executable is in a bin directory (/usr/bin from the
+    // packages), and modules do not belong there: they go in the program's own
+    // directory under lib, /usr/lib/tapto-code/plugins.
+    if (dir.filename() == "bin") return dir.parent_path() / "lib" / "tapto-code" / "plugins";
+#endif
+    return dir / "plugins";
+}
+
 fs::path plugin_directory() {
 #ifdef _WIN32
     wchar_t path[MAX_PATH * 4];
     const DWORD n = GetModuleFileNameW(nullptr, path, static_cast<DWORD>(std::size(path)));
     if (n == 0 || n >= std::size(path)) return {};
-    return fs::path(path).parent_path() / "plugins";
+    return plugin_directory_for(fs::path(path));
 #elif defined(__APPLE__)
     char buf[4096];
     uint32_t size = sizeof buf;
     if (_NSGetExecutablePath(buf, &size) != 0) return {};
     std::error_code ec;
-    return fs::canonical(buf, ec).parent_path() / "plugins";
+    return plugin_directory_for(fs::canonical(buf, ec));
 #else
     std::error_code ec;
     const fs::path exe = fs::read_symlink("/proc/self/exe", ec);
     if (ec) return {};
-    return exe.parent_path() / "plugins";
+    return plugin_directory_for(exe);
 #endif
 }
 

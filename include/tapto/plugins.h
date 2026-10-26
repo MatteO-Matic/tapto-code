@@ -20,7 +20,7 @@ namespace tapto {
 //
 // The core decides everything a plugin could get wrong, once, here:
 //
-//  - Where from: <install dir>/plugins/<name>.dll (.so) only. Not PATH, not
+//  - Where from: plugin_directory() only (beside the exe; see below). Not PATH, not
 //    the working directory, not the project.
 //  - Whose: on Windows a Release build loads a module only when it carries a
 //    valid Authenticode signature by the certificate that signed tapto-code
@@ -38,8 +38,16 @@ namespace tapto {
 //    (only the plugins the policy's own `plugins` key names).
 // ---------------------------------------------------------------------------
 
-// The folder plugins are loaded from.
+// The folder plugins are loaded from: plugin_directory_for() the running
+// executable.
 std::filesystem::path plugin_directory();
+
+// The plugin folder of the executable at `exe`, one per executable and found
+// from where it is: <exe dir>/plugins on Windows, and elsewhere too, except
+// that an executable in a bin directory (installed: /usr/bin/tapto-code) has
+// <bin>/../lib/tapto-code/plugins, so the packages put modules in
+// /usr/lib/tapto-code/plugins rather than in /usr/bin.
+std::filesystem::path plugin_directory_for(const std::filesystem::path& exe);
 
 // The names of the modules in plugin_directory().
 std::vector<std::string> available_plugins();

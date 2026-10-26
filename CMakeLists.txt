@@ -159,9 +159,11 @@ tapto_code_warnings(tapto-code)
 install(TARGETS tapto-code RUNTIME DESTINATION bin)
 
 # --- Plugins ----------------------------------------------------------------
-# Modules beside the program, in a `plugins` folder next to tapto-code.exe,
-# which is the only place the loader (src/plugins.cpp) looks. They are built
-# there in the build tree too, so a Debug build in build/ finds them. A plugin
+# Modules in the one folder the loader looks in (plugin_directory_for() in
+# src/plugins.cpp): a `plugins` folder next to tapto-code.exe on Windows;
+# installed elsewhere, where the exe is in bin/, lib/tapto-code/plugins. In
+# the build tree the exe is not in a bin/, so they are built into a `plugins`
+# folder beside it on every platform, and a build in build/ finds them. A plugin
 # links only libtapto's headers (tapto/plugin.h, tapto/scom.h), never the
 # library, and whatever it needs of its own.
 function(tapto_code_plugin target name)
@@ -176,7 +178,13 @@ function(tapto_code_plugin target name)
       LIBRARY_OUTPUT_DIRECTORY_${_cfg} "${CMAKE_BINARY_DIR}/plugins")
   endforeach()
   tapto_code_warnings(${target})
-  install(TARGETS ${target} LIBRARY DESTINATION bin/plugins)
+  # Where plugin_directory_for() looks for an installed exe: beside it on
+  # Windows, the program's own lib directory elsewhere (bin/ holds programs).
+  if(WIN32)
+    install(TARGETS ${target} LIBRARY DESTINATION bin/plugins)
+  else()
+    install(TARGETS ${target} LIBRARY DESTINATION lib/tapto-code/plugins)
+  endif()
   add_dependencies(tapto-code ${target})
   # For a packaging project that builds this one as a subdirectory (the MSI):
   # every plugin it must sign and scan for runtime DLLs, without a list of

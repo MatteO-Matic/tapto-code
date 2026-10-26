@@ -507,8 +507,10 @@ the tool-name rule and the prompt alone; Jira then adds config, secrets, rw.
       - Plugin folders (`folders` in Describe, `@<plugin>` labels): logged
         and ignored for now. Needed by the memory plugin.
       - The signed path is untested: needs a build signed with the eToken.
-      - Linux: where the .deb/.rpm puts plugins (`<exe dir>/plugins` today,
-        so `/usr/bin/plugins`, which is wrong); `/usr/lib/tapto-code/plugins`.
+      - [x] Linux: an exe in a `bin/` loads from `../lib/tapto-code/plugins`
+        (`plugin_directory_for`), and the install rule puts them there, so the
+        packages carry `/usr/lib/tapto-code/plugins/image.so`; any other exe
+        location (the build tree) keeps `<exe dir>/plugins`.
       - plugin.h should say that strings are UTF-8, paths included (the
         host passes `u8string()`), and that no exception may leave a call.
 - [x] `image` plugin: `read_image` moved out of `tools.cpp` into

@@ -293,6 +293,31 @@ int main(int argc, char** argv) {
                    std::string::npos);
     }
 
+    // --- where the plugins of an executable are --------------------------------------
+    {
+        using tapto::plugin_directory_for;
+        // The build tree: beside the exe, everywhere.
+        CHECK_EQ(plugin_directory_for(fs::path("/src/build/tapto-code")).generic_string(),
+                 "/src/build/plugins");
+#ifdef _WIN32
+        // Windows: beside the exe, installed too.
+        CHECK_EQ(plugin_directory_for(fs::path("C:/Users/u/AppData/Local/Programs/tapto-code/bin/"
+                                               "tapto-code.exe")).generic_string(),
+                 "C:/Users/u/AppData/Local/Programs/tapto-code/bin/plugins");
+#else
+        // Installed in a bin/: the program's own lib directory, not bin/.
+        CHECK_EQ(plugin_directory_for(fs::path("/usr/bin/tapto-code")).generic_string(),
+                 "/usr/lib/tapto-code/plugins");
+        CHECK_EQ(plugin_directory_for(fs::path("/opt/tapto/bin/tapto-code")).generic_string(),
+                 "/opt/tapto/lib/tapto-code/plugins");
+        // Only a directory named exactly bin.
+        CHECK_EQ(plugin_directory_for(fs::path("/home/u/sbin2/tapto-code")).generic_string(),
+                 "/home/u/sbin2/plugins");
+#endif
+        // The running test is in the build tree.
+        CHECK_EQ(tapto::plugin_directory().filename().string(), "plugins");
+    }
+
     // --- the image plugin ----------------------------------------------------------------
     {
         tapto::Plugins plugins;

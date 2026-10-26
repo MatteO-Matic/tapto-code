@@ -286,8 +286,10 @@ again with a different mode changes the mode.
 
 A grant lasts for the session. The read-only commands exist in tapto-word too.
 
-**Plugins.** Tools beyond the core come as plugins: modules installed in the
-`plugins` folder beside `tapto-code.exe`, loaded only from there. Loading one
+**Plugins.** Tools beyond the core come as plugins: modules installed with
+tapto-code and loaded only from its own plugin folder, `plugins` beside
+`tapto-code.exe` on Windows and `/usr/lib/tapto-code/plugins` from the Linux
+packages (in a build tree, `plugins` beside the binary). Loading one
 gives the model its tools for the session:
 
 ```

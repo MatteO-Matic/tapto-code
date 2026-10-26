@@ -59,10 +59,10 @@ breaking changes and the patch number everything else.)
   attach a short instruction to a command — which arguments it expects, or
   what to pass them. The note is shown to the model alongside the command and
   is never run.
-- The model can now look at image files (PNG, JPEG, WebP, BMP, GIF, TGA) with
-  the `read_image` tool. When a file it wants to see is an image, the text
-  tools point it there. The image is normalised to PNG and its longest side
-  capped at 1600 pixels; larger images are down-scaled before being shown.
+- With a model that can see, `/add-plugin image` (or `plugins = image:ro` in
+  the config) lets it look at image files: PNG, JPEG, WebP, BMP, GIF and TGA.
+  Each image is normalised to PNG and its longest side capped at 1600 pixels;
+  larger images are down-scaled before being shown.
 
 ### Fixed
 

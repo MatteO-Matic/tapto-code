@@ -5,9 +5,10 @@
 // probe.cpp: what is offered (writing tools only rw, the path mark stripped),
 // what a call gets (paths resolved and checked by the host first), what comes
 // back through the host (an image, a file in @tmp, a long result cut), the
-// prompt, the tool-name rule, policy, and unloading.
+// prompt, the tool-name rule, policy, and unloading. Then the image plugin
+// (plugins/image), the way the model uses it.
 //
-//   test-plugins <probe module> <probe module with a misnamed tool>
+//   test-plugins <probe module> <probe module with a misnamed tool> <image module>
 
 #include "tapto/plugins.h"
 
@@ -18,6 +19,19 @@
 #include "tapto/tools.h"
 
 #include <nlohmann/json.hpp>
+
+// stb builds the test images and decodes what the image plugin attached.
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4996 4244 4245 4100 4456 4457 4702)
+#endif
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
 #include <cstdlib>
 #include <filesystem>
@@ -104,15 +118,39 @@ bool starts_with(const std::string& s, const std::string& prefix) {
     return s.rfind(prefix, 0) == 0;
 }
 
+bool contains(const std::string& s, const std::string& part) {
+    return s.find(part) != std::string::npos;
+}
+
+// A w x h RGBA image as a PNG file at `path`; pixel (x, y) from `color`.
+template <class F>
+bool write_png(const fs::path& path, int w, int h, F color) {
+    std::vector<uint8_t> px(static_cast<std::size_t>(w) * h * 4);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) color(x, y, &px[(static_cast<std::size_t>(y) * w + x) * 4]);
+    }
+    std::vector<uint8_t> png;
+    auto cb = [](void* ctx, void* data, int size) {
+        auto* out = static_cast<std::vector<uint8_t>*>(ctx);
+        out->insert(out->end(), static_cast<const uint8_t*>(data),
+                    static_cast<const uint8_t*>(data) + size);
+    };
+    if (!stbi_write_png_to_func(cb, &png, w, h, 4, px.data(), w * 4)) return false;
+    std::ofstream(path, std::ios::binary).write(reinterpret_cast<const char*>(png.data()),
+                                                static_cast<std::streamsize>(png.size()));
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 3) {
-        std::cout << "usage: test-plugins <probe module> <misnamed probe module>\n";
+    if (argc != 4) {
+        std::cout << "usage: test-plugins <probe module> <misnamed probe module> <image module>\n";
         return 2;
     }
     const fs::path probe = argv[1];
     const fs::path misnamed = argv[2];
+    const fs::path image_module = argv[3];
 
     const fs::path fake_home = fs::temp_directory_path() / "tapto-plugins-tests-home";
     const std::string saved_home = get_env(kHomeVar);
@@ -253,6 +291,79 @@ int main(int argc, char** argv) {
         CHECK_TRUE(plugins.add("Bad Name", false).find("not a plugin name") != std::string::npos);
         CHECK_TRUE(plugins.add("no-such-plugin", false).find("there is no plugin") !=
                    std::string::npos);
+    }
+
+    // --- the image plugin ----------------------------------------------------------------
+    {
+        tapto::Plugins plugins;
+        CHECK_EQ(plugins.add_file(image_module, /*writable=*/false), "");
+        const auto tools = plugins.tools();
+        CHECK_EQ(names(tools), "image_read");
+        CHECK_TRUE(contains(plugins.prompt(), "image_read"));
+        Context ctx;
+
+        // A 2x1 PNG, red then blue: attached, and what is attached decodes to it.
+        CHECK_TRUE(write_png(cwd / "probe-2x1.png", 2, 1, [](int x, int, uint8_t* p) {
+            p[0] = x ? 0 : 255; p[1] = 0; p[2] = x ? 255 : 0; p[3] = 255;
+        }));
+        std::string r = call(tools, ctx, "image_read", {{"path", "probe-2x1.png"}});
+        CHECK_EQ(r, "image attached: 2x1 PNG");
+        tapto::ToolImage img;
+        CHECK_TRUE(tapto::takeToolImage(ctx, img));
+        CHECK_TRUE(img.width == 2 && img.height == 1);
+        CHECK_EQ(img.label, "probe-2x1.png"); // the path as the model wrote it
+        int dw = 0, dh = 0, dc = 0;
+        stbi_uc* d = stbi_load_from_memory(img.png.data(), static_cast<int>(img.png.size()),
+                                           &dw, &dh, &dc, 0);
+        CHECK_TRUE(d != nullptr && dw == 2 && dh == 1);
+        if (d) {
+            CHECK_TRUE(d[0] == 255 && d[dc] == 0 && d[dc + 2] == 255);
+            stbi_image_free(d);
+        }
+
+        // Larger than 1600 on its longest side: down-scaled, aspect kept.
+        CHECK_TRUE(write_png(cwd / "probe-big.png", 3200, 1000, [](int, int, uint8_t* p) {
+            p[0] = 10; p[1] = 20; p[2] = 30; p[3] = 255;
+        }));
+        r = call(tools, ctx, "image_read", {{"path", "probe-big.png"}});
+        CHECK_EQ(r, "image attached: 1600x500 PNG (down-scaled from 3200x1000)");
+        CHECK_TRUE(tapto::takeToolImage(ctx, img) && img.width == 1600 && img.height == 500);
+
+        // A header claiming 20000x10 is refused before it is decoded.
+        {
+            std::ifstream in(cwd / "probe-2x1.png", std::ios::binary);
+            std::string png((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            png[16] = 0; png[17] = 0; png[18] = char(0x4e); png[19] = char(0x20); // width 20000
+            png[20] = 0; png[21] = 0; png[22] = 0; png[23] = 10;
+            std::ofstream(cwd / "probe-huge.png", std::ios::binary) << png;
+        }
+        r = call(tools, ctx, "image_read", {{"path", "probe-huge.png"}});
+        CHECK_TRUE(starts_with(r, "ERROR: probe-huge.png is 20000x10"));
+        CHECK_TRUE(!tapto::takeToolImage(ctx, img));
+
+        // Not images: a text file, a binary one, none at all.
+        r = call(tools, ctx, "image_read", {{"path", "probe-input.txt"}});
+        CHECK_TRUE(starts_with(r, "ERROR: probe-input.txt is not an image"));
+        { std::ofstream(cwd / "probe-blob.bin", std::ios::binary) << std::string("MZ\0\0\0\0PE\0\0", 10); }
+        r = call(tools, ctx, "image_read", {{"path", "probe-blob.bin"}});
+        CHECK_TRUE(contains(r, "binary, so it is not an image"));
+        r = call(tools, ctx, "image_read", {{"path", "probe-none.png"}});
+        CHECK_EQ(r, "ERROR: Not found: probe-none.png");
+        // Outside every folder: the host refuses, the plugin is never asked.
+        r = call(tools, ctx, "image_read", {{"path", (fake_home.parent_path() / "x.png").u8string()}});
+        CHECK_TRUE(starts_with(r, "ERROR") && !contains(r, "Not found"));
+
+        // The core's text tools no longer name a tool that may not be loaded.
+        tapto::set_granted_folders(&folders);
+        for (const auto& t : tapto::builtin_tools()) {
+            CHECK_TRUE(t.name != "read_image");
+            if (t.name != "str_replace_based_edit_tool") continue;
+            r = t.executor(ctx, {{"command", "view"}, {"path", "probe-2x1.png"}});
+            CHECK_TRUE(contains(r, "is a binary file") && !contains(r, "read_image"));
+        }
+
+        for (const char* f : {"probe-2x1.png", "probe-big.png", "probe-huge.png", "probe-blob.bin"})
+            fs::remove(cwd / f, ec);
     }
 
     tapto::set_granted_folders(nullptr);

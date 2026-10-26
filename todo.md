@@ -511,8 +511,13 @@ the tool-name rule and the prompt alone; Jira then adds config, secrets, rw.
         so `/usr/bin/plugins`, which is wrong); `/usr/lib/tapto-code/plugins`.
       - plugin.h should say that strings are UTF-8, paths included (the
         host passes `u8string()`), and that no exception may leave a call.
-- [ ] `image` plugin: `read_image` moved out of `tools.cpp` into
-      `plugins/image/`, the core tool and stb removed (see above).
+- [x] `image` plugin: `read_image` moved out of `tools.cpp` into
+      `plugins/image/image.cpp` as `image_read`, stb with it; the core no
+      longer links stb and the editor's binary-file message no longer names
+      it. The plugin now reads the header's dimensions (`stbi_info`) before
+      decoding, where the core tool decoded first. Built into
+      `<build>/plugins/`, installed to `bin/plugins`. Tests moved from
+      test-edits to test-plugins.
 - [ ] `jira.dll`: tapto-jira's `jira.cpp` behind `ITaptoPlugin`, its read
       tools ro and create/update/comment/transition rw.
 - [ ] Installer: `plugins\` in the MSI, the plugin signed in

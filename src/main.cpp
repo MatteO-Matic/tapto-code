@@ -91,10 +91,12 @@ const char* kUsage =
     "  list                List config values\n"
     "\n"
     "Command commands (allow-listed commands the chat agent may run):\n"
-    "  command add [--ro] <name> <command...>\n"
+    "  command add [--ro] [--note \"...\"] <name> <command...>\n"
     "                                    Allow-list a command (default scope: local);\n"
     "                                    --ro: it only reads, so it may also use\n"
-    "                                    folders granted read-only\n"
+    "                                    folders granted read-only; --note: a hint\n"
+    "                                    shown to the model about how to use the\n"
+    "                                    command (stored as a trailing '#', not run)\n"
     "  command remove <name>             Remove a command\n"
     "  command list                      List configured commands\n"
     "\n"
@@ -394,8 +396,18 @@ int cmd_command(std::optional<Level> level, std::vector<std::string> rest) {
             reads_only = true;
             rest.erase(rest.begin() + 1);
         }
+        // --note "..." is a hint for the model, stored as a trailing "#". It
+        // must come after --ro, so a note that begins with --ro is not lost.
+        std::string note;
+        for (std::size_t i = 1; i + 1 < rest.size(); ++i) {
+            if (rest[i] == "--note") {
+                note = rest[i + 1];
+                rest.erase(rest.begin() + std::ptrdiff_t(i), rest.begin() + std::ptrdiff_t(i) + 2);
+                break;
+            }
+        }
         if (rest.size() < 3) {
-            ui::print_error("'command add' requires [--ro] <name> <command...>");
+            ui::print_error("'command add' requires [--ro] [--note \"...\"] <name> <command...>");
             return 2;
         }
         const std::string& name = rest[1];
@@ -408,11 +420,12 @@ int cmd_command(std::optional<Level> level, std::vector<std::string> rest) {
             return 2;
         }
         std::string cmdline;
-        for (size_t i = 2; i < rest.size(); ++i) {
+        for (std::size_t i = 2; i < rest.size(); ++i) {
             if (i > 2) cmdline += ' ';
             cmdline += rest[i];
         }
         if (reads_only && !command_reads_only(cmdline)) cmdline = std::string(kReadOnlyMark) + " " + cmdline;
+        if (!note.empty()) cmdline += " # " + note;
         Level lvl = level.value_or(Level::Local);
         if (lvl == Level::Policy) {
             ui::print_error("the policy scope is read-only; it is set by your organization in " +
@@ -2027,9 +2040,24 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
             if (reads_only) iss >> name;
             std::string remainder;
             std::getline(iss, remainder);
+            // A trailing --note "..." is a hint for the model; it comes after
+            // the command, so the note's text can itself start with anything.
+            std::string note;
+            const std::size_t note_pos = remainder.rfind(" --note ");
+            if (note_pos != std::string::npos) {
+                std::string rest = remainder.substr(note_pos + std::string(" --note ").size());
+                remainder = remainder.substr(0, note_pos);
+                const std::size_t open = rest.find('"');
+                if (open != std::string::npos) {
+                    const std::size_t close = rest.find('"', open + 1);
+                    if (close != std::string::npos) {
+                        note = rest.substr(open + 1, close - open - 1);
+                    }
+                }
+            }
             size_t begin = remainder.find_first_not_of(" \t");
             if (name.empty() || name == "--ro" || begin == std::string::npos) {
-                ui::print_line("usage: /add-command [--ro] <name> <command...>");
+                ui::print_line("usage: /add-command [--ro] <name> <command...> [--note \"...\"]");
                 continue;
             }
             if (name.find('=') != std::string::npos) {
@@ -2046,6 +2074,7 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
             }
             std::string cmdline = remainder.substr(begin);
             if (reads_only && !command_reads_only(cmdline)) cmdline = std::string(kReadOnlyMark) + " " + cmdline;
+            if (!note.empty()) cmdline += " # " + note;
             if (std::string why = command_line_refusal(cmdline); !why.empty()) {
                 ui::print_line("error: " + why);
                 continue;

@@ -92,6 +92,28 @@ std::size_t after_read_only_mark(const std::string& cmdline) {
     return rest == std::string::npos ? cmdline.size() : rest;
 }
 
+// The first unquoted '#', or npos. A '#' inside double quotes is a literal
+// character of an argument, the way the template tokenizer reads it, so it
+// must not start a note: `grep -n "#TODO" f` keeps its quoted '#'.
+std::size_t note_start(const std::string& s) {
+    bool in_quotes = false;
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '"') { in_quotes = !in_quotes; continue; }
+        if (!in_quotes && s[i] == '#') return i;
+    }
+    return std::string::npos;
+}
+
+// A note is at the end of the stored value and never runs, so the command line
+// is what is before it: the program and its placeholders only. The space
+// before the '#' is not part of the command line either, so it is trimmed.
+std::string command_line(const std::string& cmdline) {
+    const std::size_t at = note_start(cmdline);
+    std::string line = (at == std::string::npos) ? cmdline : cmdline.substr(0, at);
+    while (!line.empty() && (line.back() == ' ' || line.back() == '\t')) line.pop_back();
+    return line;
+}
+
 } // namespace
 
 bool command_reads_only(const std::string& cmdline) {
@@ -99,11 +121,26 @@ bool command_reads_only(const std::string& cmdline) {
 }
 
 std::string command_template(const std::string& cmdline) {
-    const std::size_t rest = after_read_only_mark(cmdline);
-    return rest == std::string::npos ? cmdline : cmdline.substr(rest);
+    // Drop the trailing note first (a hint, not part of the command line),
+    // then the leading [ro] mark: what is run.
+    const std::string line = command_line(cmdline);
+    const std::size_t rest = after_read_only_mark(line);
+    return rest == std::string::npos ? line : line.substr(rest);
+}
+
+std::string command_note(const std::string& cmdline) {
+    const std::size_t at = note_start(cmdline);
+    if (at == std::string::npos) return "";
+    std::string note = cmdline.substr(at + 1);
+    const std::size_t b = note.find_first_not_of(" \t");
+    if (b == std::string::npos) return "";
+    const std::size_t e = note.find_last_not_of(" \t\r\n");
+    return note.substr(b, e - b + 1);
 }
 
 std::string command_line_refusal(const std::string& cmdline_with_mark) {
+    // The refusal is about the command line that would run; the trailing note
+    // is a hint and never runs, so shell syntax in it is no refusal.
     const std::string cmdline = command_template(cmdline_with_mark);
     if (cmdline.find_first_not_of(" \t") == std::string::npos) {
         return "the command line names no program";

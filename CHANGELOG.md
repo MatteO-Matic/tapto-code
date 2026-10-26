@@ -46,6 +46,24 @@ breaking changes and the patch number everything else.)
 
 ## [Unreleased]
 
+### Added
+
+- `command add --note "..."` and `/add-command <name> <cmd> --note "..."`
+  attach a short instruction to a command — which arguments it expects, or
+  what to pass them. The note is shown to the model alongside the command and
+  is never run.
+- The model can now look at image files (PNG, JPEG, WebP, BMP, GIF, TGA) with
+  the `read_image` tool. When a file it wants to see is an image, the text
+  tools point it there. The image is normalised to PNG and its longest side
+  capped at 1600 pixels; larger images are down-scaled before being shown.
+
+### Fixed
+
+- A table the model returned that was wider than your terminal had its rows
+  cut off with a `…` where they did not fit, so part of each cell was missing.
+  The table now wraps onto extra lines so every cell shows in full, and the
+  bold and code formatting inside a cell is kept.
+
 ## [1.2.0] — 2026-10-20
 
 ### Added

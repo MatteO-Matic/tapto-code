@@ -11,10 +11,17 @@
 
 #include "tapto/commands.h"
 #include "tapto/context.h"
+#include "tapto/tool_image.h"
 #include "tapto/tool_registry.h"
 #include "tapto/tools.h"
 
 #include <nlohmann/json.hpp>
+
+// stb_image: the test validates read_image's output by decoding it back, and
+// stb_image_write builds the test PNGs themselves. Declarations only — the
+// implementations are compiled into the linked tools.cpp object.
+#include "stb_image.h"
+#include "stb_image_write.h"
 
 #include <cstdlib>
 #include <filesystem>
@@ -112,6 +119,13 @@ ToolExecutorFn find_editor(Context& ctx) {
 ToolExecutorFn find_run_command(Context& ctx) {
     for (const auto& t : ctx.tools) {
         if (t.name == "run_command") return t.executor;
+    }
+    return nullptr;
+}
+
+ToolExecutorFn find_read_image(Context& ctx) {
+    for (const auto& t : ctx.tools) {
+        if (t.name == "read_image") return t.executor;
     }
     return nullptr;
 }
@@ -850,6 +864,94 @@ int main() {
         CHECK_EQ(r, "alpha\nbeta\n");
     }
 
+    // --- read_image: decode a real PNG and attach it ------------------------
+    // The executor returns "image attached: WxH PNG" and leaves the PNG bytes
+    // in the Context via tapto::putToolImage. The test builds the test PNG
+    // itself with stb_image_write and validates the attached bytes by
+    // decoding them with stb_image (implementations compiled into the linked
+    // tools.cpp object; only the declarations are visible here).
+    {
+        ToolExecutorFn readimg = find_read_image(ctx);
+        CHECK_TRUE(readimg != nullptr);
+        fs::create_directories(kDir, ec);
+
+        // A 2x1 PNG: left pixel red, right pixel blue. stb_image_write has no
+        // write-to-memory API, so a small callback appends the bytes to a
+        // vector as the encoder emits them.
+        std::vector<uint8_t> src = {
+            255, 0, 0, 255,   // (255,0,0,255)
+            0,   0, 255, 255, // (0,0,255,255)
+        };
+        std::vector<uint8_t> png;
+        auto png_cb = [](void* context, void* data, int size) {
+            auto* out = static_cast<std::vector<uint8_t>*>(context);
+            out->insert(out->end(),
+                        static_cast<const uint8_t*>(data),
+                        static_cast<const uint8_t*>(data) + size);
+        };
+        const int ok = stbi_write_png_to_func(png_cb, &png, 2, 1, 4, src.data(), 2 * 4);
+        CHECK_TRUE(ok != 0);
+        CHECK_TRUE(!png.empty());
+        write_raw(test_path("test.png"),
+                  std::string(png.begin(), png.end()));
+
+        // A successful read: the attached image is decodable and has the
+        // right size.
+        std::string result = readimg(ctx, json{{"path", test_path("test.png")}});
+        CHECK_TRUE(result.rfind("ERROR:", 0) != 0);
+        CHECK_TRUE(result.find("image attached") != std::string::npos);
+        CHECK_TRUE(result.find("2x1") != std::string::npos);
+
+        // The PNG bytes are in the context via putToolImage.
+        tapto::ToolImage img;
+        CHECK_TRUE(tapto::takeToolImage(ctx, img));
+        CHECK_TRUE(!img.empty());
+        CHECK_EQ(std::to_string(img.width), "2");
+        CHECK_EQ(std::to_string(img.height), "1");
+        // Decode the attached bytes to validate them: a 2x1, the leftmost
+        // pixel's red channel is 255, and the PNG magic is intact.
+        CHECK_TRUE(img.png.size() >= 8);
+        CHECK_EQ(std::to_string((int)img.png[0]), "137"); // PNG signature byte 0 (0x89)
+        int dw = 0, dh = 0, dcomp = 0;
+        stbi_uc* decoded = stbi_load_from_memory(
+            img.png.data(), (int)img.png.size(), &dw, &dh, &dcomp, 0);
+        CHECK_TRUE(decoded != nullptr);
+        if (decoded) {
+            CHECK_EQ(std::to_string(dw), "2");
+            CHECK_EQ(std::to_string(dh), "1");
+            CHECK_EQ(std::to_string((int)decoded[0]), "255"); // left pixel, R
+            CHECK_EQ(std::to_string((int)decoded[dcomp]), "0");   // right pixel, R
+            CHECK_EQ(std::to_string((int)decoded[dcomp + 2]), "255"); // right pixel, B
+            stbi_image_free(decoded);
+        }
+
+        // A text file is refused and points at the text tools.
+        write_raw(test_path("note.txt"), "hello\n");
+        result = readimg(ctx, json{{"path", test_path("note.txt")}});
+        CHECK_TRUE(result.rfind("ERROR:", 0) == 0);
+        CHECK_TRUE(result.find("not an image") != std::string::npos);
+
+        // A binary file without an image extension is refused as binary.
+        write_raw(test_path("blob2.bin"), std::string("MZ\0\0\0\0PE\0\0", 8));
+        result = readimg(ctx, json{{"path", test_path("blob2.bin")}});
+        CHECK_TRUE(result.rfind("ERROR:", 0) == 0);
+        CHECK_TRUE(result.find("binary") != std::string::npos);
+
+        // A non-existent path is an error.
+        result = readimg(ctx, json{{"path", test_path("nope.png")}});
+        CHECK_TRUE(result.rfind("ERROR:", 0) == 0);
+        CHECK_TRUE(result.find("Not found") != std::string::npos);
+
+        // view on a PNG says to use read_image.
+        result = edit(ctx, json{{"command", "view"}, {"path", test_path("test.png")}});
+        CHECK_TRUE(result.rfind("ERROR:", 0) == 0);
+        CHECK_TRUE(result.find("read_image") != std::string::npos);
+
+        fs::remove(test_path("test.png"), ec);
+        fs::remove(test_path("note.txt"), ec);
+        fs::remove(test_path("blob2.bin"), ec);
+    }
+
     fs::remove_all(kDir, ec);
 
     // --- granted folders ----------------------------------------------------
@@ -1020,6 +1122,22 @@ int main() {
         CHECK_EQ(tapto::command_template("[ro]   grep -n %1"), "grep -n %1");
         CHECK_EQ(tapto::command_template("grep -n %1"), "grep -n %1");
         CHECK_TRUE(!tapto::command_line_refusal("[ro]").empty()); // no program
+
+        // A trailing `# note` is a hint for the model, not part of the command
+        // line: it is dropped before anything runs, surfaced on its own, and
+        // does not count as shell syntax. A '#' inside quotes is a literal
+        // argument, so it does not start a note.
+        CHECK_EQ(tapto::command_note("grep -n %1 # show matches"), "show matches");
+        CHECK_EQ(tapto::command_note("[ro] grep -n %1 # read-only search"), "read-only search");
+        CHECK_EQ(tapto::command_note("grep -n %1"), "");
+        CHECK_EQ(tapto::command_note("grep -n %1 #"), "");        // '#' with nothing after
+        CHECK_EQ(tapto::command_note("echo \"a\" # note"), "note");
+        CHECK_EQ(tapto::command_note("grep -n \"#1\" f"), "");            // a quoted '#' is literal
+        CHECK_EQ(tapto::command_template("grep -n %1 # show matches"), "grep -n %1");
+        CHECK_EQ(tapto::command_template("[ro] grep -n %1 # read-only search"), "grep -n %1");
+        CHECK_EQ(tapto::command_template("grep -n \"#1\" f"), "grep -n \"#1\" f"); // quoted '#' runs
+        // Shell syntax in a note is no refusal: the note never runs.
+        CHECK_TRUE(tapto::command_line_refusal("git diff %1 # pipe the output: git diff %1 | less").empty());
 
         // The working directory as the set's home root, the way main sets it
         // up: read_file reads the project by a bare relative path (it used to

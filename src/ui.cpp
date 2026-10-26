@@ -1111,7 +1111,7 @@ void print_help(const std::vector<std::string>& tool_names) {
               << "    /effort [value|off]           show / set OpenAI reasoning-effort (low|medium|high|...)\n"
               << "    /env                          show session environment (directory, model, history)\n"
               << "    /list-commands                list allow-listed shell commands\n"
-              << "    /add-command <name> <cmd>     add a new allow-listed command\n"
+              << "    /add-command <name> <cmd>     add a new allow-listed command ([--ro], [--note \"...\"])\n"
               << "    /add-folder <path> [ro|rw]    grant the model a folder: read-only, or rw to edit\n"
               << "    /remove-folder <path|label>   revoke it\n"
               << "    /list-folders                 show the working directory and what is granted\n"

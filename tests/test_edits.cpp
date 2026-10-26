@@ -1021,6 +1021,22 @@ int main() {
         CHECK_EQ(tapto::command_template("grep -n %1"), "grep -n %1");
         CHECK_TRUE(!tapto::command_line_refusal("[ro]").empty()); // no program
 
+        // A trailing `# note` is a hint for the model, not part of the command
+        // line: it is dropped before anything runs, surfaced on its own, and
+        // does not count as shell syntax. A '#' inside quotes is a literal
+        // argument, so it does not start a note.
+        CHECK_EQ(tapto::command_note("grep -n %1 # show matches"), "show matches");
+        CHECK_EQ(tapto::command_note("[ro] grep -n %1 # read-only search"), "read-only search");
+        CHECK_EQ(tapto::command_note("grep -n %1"), "");
+        CHECK_EQ(tapto::command_note("grep -n %1 #"), "");        // '#' with nothing after
+        CHECK_EQ(tapto::command_note("echo \"a\" # note"), "note");
+        CHECK_EQ(tapto::command_note("grep -n \"#1\" f"), "");            // a quoted '#' is literal
+        CHECK_EQ(tapto::command_template("grep -n %1 # show matches"), "grep -n %1");
+        CHECK_EQ(tapto::command_template("[ro] grep -n %1 # read-only search"), "grep -n %1");
+        CHECK_EQ(tapto::command_template("grep -n \"#1\" f"), "grep -n \"#1\" f"); // quoted '#' runs
+        // Shell syntax in a note is no refusal: the note never runs.
+        CHECK_TRUE(tapto::command_line_refusal("git diff %1 # pipe the output: git diff %1 | less").empty());
+
         // The working directory as the set's home root, the way main sets it
         // up: read_file reads the project by a bare relative path (it used to
         // land in the only grant, or be refused as "outside every granted

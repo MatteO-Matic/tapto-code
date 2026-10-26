@@ -1811,9 +1811,16 @@ std::string execute_list_commands(Context& /*context*/, const json& /*in*/) {
                       "none and allows no user commands.\n");
     } else {
         out << "\nAllow-listed commands (those marked [ro] only read, so they may also "
-               "run in, and take paths from, folders granted read-only):\n";
+               "run in, and take paths from, folders granted read-only). A trailing "
+               "# after a command line is a note: instructions to you about how to use "
+               "that command, not part of what is run:\n";
         for (const auto& [name, cmdline] : cmds) {
-            out << "- " << name << ": " << cmdline << "\n";
+            const bool ro = command_reads_only(cmdline);
+            out << "- " << name << ": " << (ro ? std::string(kReadOnlyMark) + " " : "")
+                << command_template(cmdline);
+            if (std::string note = command_note(cmdline); !note.empty())
+                out << "  # " << note;
+            out << "\n";
         }
     }
     return out.str();

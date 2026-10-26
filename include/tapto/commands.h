@@ -51,8 +51,14 @@ std::string command_line_refusal(const std::string& cmdline);
 // .git and tapto-code's own folders stay refused either way.
 extern const char* const kReadOnlyMark; // "[ro]"
 bool command_reads_only(const std::string& cmdline);
-// The command line without its [ro] mark: what is run.
+// The command line without its [ro] mark: what is run. A trailing `# note`
+// (the first unquoted `#`) is dropped too -- it is a hint for the model, not
+// part of the command line.
 std::string command_template(const std::string& cmdline);
+
+// The trailing `# note` of a stored command line, trimmed, or "" when it has
+// none. It is shown to the model (list_commands) and the CLI, and never runs.
+std::string command_note(const std::string& cmdline);
 
 // The folders searched for a command's program before PATH, and the only
 // place a command line that needs a shell can live: as a script (.cmd/.bat on

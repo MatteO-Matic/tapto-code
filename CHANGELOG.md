@@ -46,6 +46,13 @@ breaking changes and the patch number everything else.)
 
 ## [Unreleased]
 
+### Added
+
+- `command add --note "..."` and `/add-command <name> <cmd> --note "..."`
+  attach a short instruction to a command — which arguments it expects, or
+  what to pass them. The note is shown to the model alongside the command and
+  is never run.
+
 ### Fixed
 
 - A table the model returned that was wider than your terminal had its rows

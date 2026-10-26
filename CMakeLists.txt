@@ -178,6 +178,10 @@ function(tapto_code_plugin target name)
   tapto_code_warnings(${target})
   install(TARGETS ${target} LIBRARY DESTINATION bin/plugins)
   add_dependencies(tapto-code ${target})
+  # For a packaging project that builds this one as a subdirectory (the MSI):
+  # every plugin it must sign and scan for runtime DLLs, without a list of
+  # its own to keep in step.
+  set_property(GLOBAL APPEND PROPERTY TAPTO_CODE_PLUGINS ${target})
 endfunction()
 
 # image: image_read, for a model that can see.

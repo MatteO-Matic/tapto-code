@@ -17,9 +17,18 @@ endif()
 # -- and it brings its own dependency pins (nlohmann_json, cpp-httplib,
 # OpenSSL), exported on the `tapto::tapto` target, so nothing is repeated here.
 #
-# Bump LIBTAPTO_TAG to take a library change. -DLIBTAPTO_TAG=main builds
+# Bump LIBTAPTO_PIN to take a library change. -DLIBTAPTO_TAG=main builds
 # against an unreleased library, and -DFETCHCONTENT_SOURCE_DIR_LIBTAPTO=<path>
 # against a working tree, which is how a change spanning both is developed.
+#
+# LIBTAPTO_TAG is a cache entry, and a cache entry's default never replaces a
+# value already in the cache, so a bumped default would not reach a build
+# folder configured before the bump: it kept building the old tag, silently.
+# The pin is therefore a plain variable, and the cache remembers which pin it
+# last filled in (_LIBTAPTO_PIN_SEEN): a LIBTAPTO_TAG still equal to that pin
+# follows the new one; one set by hand to anything else is left alone. A
+# cache from before this rule has no record, and its LIBTAPTO_TAG, a vX.Y.Z
+# that this file put there, is moved to the pin once, with a message.
 #
 # What is NOT in the library, and is this program's own: the tool table
 # (src/tools.cpp), the allow-listed commands (src/commands.cpp), the CLI and
@@ -30,7 +39,29 @@ endif()
 # on MSVC, so a warning it trips here is fixed in the library and released.
 set(LIBTAPTO_BUILD_TESTS ON CACHE BOOL "" FORCE)
 include(FetchContent)
-set(LIBTAPTO_TAG "v0.4.0" CACHE STRING "libtapto version to build against")
+set(LIBTAPTO_PIN "v0.4.0")
+if(NOT DEFINED CACHE{LIBTAPTO_TAG})
+  set(LIBTAPTO_TAG "${LIBTAPTO_PIN}" CACHE STRING "libtapto version to build against")
+elseif(NOT LIBTAPTO_TAG STREQUAL LIBTAPTO_PIN)
+  if(DEFINED CACHE{_LIBTAPTO_PIN_SEEN})
+    string(COMPARE EQUAL "${LIBTAPTO_TAG}" "${_LIBTAPTO_PIN_SEEN}" _follow_pin)
+  elseif(LIBTAPTO_TAG MATCHES "^v[0-9]+\\.[0-9]+\\.[0-9]+$")
+    set(_follow_pin TRUE)
+  else()
+    set(_follow_pin FALSE)
+  endif()
+  if(_follow_pin)
+    message(STATUS "libtapto: ${LIBTAPTO_TAG} -> ${LIBTAPTO_PIN} (the pin moved)")
+    set(LIBTAPTO_TAG "${LIBTAPTO_PIN}" CACHE STRING "libtapto version to build against" FORCE)
+  else()
+    message(STATUS "libtapto: building ${LIBTAPTO_TAG}, set by hand (the pin is ${LIBTAPTO_PIN})")
+  endif()
+endif()
+set(_LIBTAPTO_PIN_SEEN "${LIBTAPTO_PIN}" CACHE INTERNAL "the pin LIBTAPTO_TAG last followed")
+# A -DLIBTAPTO_TAG=... without a type leaves the entry UNINITIALIZED.
+set_property(CACHE LIBTAPTO_TAG PROPERTY TYPE STRING)
+set_property(CACHE LIBTAPTO_TAG PROPERTY HELPSTRING
+  "libtapto version to build against; follows LIBTAPTO_PIN unless set to another")
 FetchContent_Declare(libtapto
   GIT_REPOSITORY https://github.com/centlakestefan/libtapto.git
   GIT_TAG        ${LIBTAPTO_TAG}

@@ -216,6 +216,12 @@ endif()
 tapto_code_plugin(tapto-plugin-memory memory plugins/memory/memory.cpp)
 target_link_libraries(tapto-plugin-memory PRIVATE nlohmann_json::nlohmann_json)
 
+# skills: instructions for kinds of task in a folder of the user's (or the
+# organization's, through skills-folder), read-only as @skills; the prompt
+# carries their index.
+tapto_code_plugin(tapto-plugin-skills skills plugins/skills/skills.cpp)
+target_link_libraries(tapto-plugin-skills PRIVATE nlohmann_json::nlohmann_json)
+
 # --- Tests ------------------------------------------------------------------
 # Plain executables with assertions of their own, so `ctest` needs no test
 # framework fetched or installed. Run with: ctest --test-dir build --output-on-failure
@@ -352,12 +358,13 @@ else()
   target_link_libraries(test-plugins PRIVATE ${CMAKE_DL_LIBS})
 endif()
 add_dependencies(test-plugins tapto-probe tapto-probe-misnamed tapto-plugin-image
-  tapto-plugin-jira)
+  tapto-plugin-jira tapto-plugin-skills)
 tapto_code_warnings(test-plugins)
 
 add_test(NAME plugins COMMAND test-plugins
   $<TARGET_FILE:tapto-probe> $<TARGET_FILE:tapto-probe-misnamed>
-  $<TARGET_FILE:tapto-plugin-image> $<TARGET_FILE:tapto-plugin-jira>)
+  $<TARGET_FILE:tapto-plugin-image> $<TARGET_FILE:tapto-plugin-jira>
+  $<TARGET_FILE:tapto-plugin-skills>)
 
 # Markdown table rendering: wrapping (not clipping), alignment, inline styling
 # and CJK width are exercised at explicit widths via render_markdown (pure,

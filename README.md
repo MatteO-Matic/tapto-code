@@ -155,7 +155,7 @@ allow-user-providers = 0            # only blocks the policy itself defines are 
 allow-user-commands = 0             # only commands the policy defines may be run or added
 script-folder = D:\Tools\tapto     # the machine's script folder (an absolute path)
 allowed-plugins = image, jira       # the only plugins that may be loaded
-allow-user-plugins = 0              # only the plugins the policy's own `plugins` names
+allow-user-plugins = 0              # only the plugins the policy's own plugin.<name> load
 ```
 
 Confinement holds only when the policy also fixes where a permitted block
@@ -231,7 +231,7 @@ provider's own format, so it resumes only with a provider of the same type
 (claude, openai or gemini). The file holds whatever the model read, as the
 trace file does.
 
-**The model's memory.** With the memory plugin (`plugins = memory:rw` in the
+**The model's memory.** With the memory plugin (`plugin.memory = rw` in the
 config, or `/add-plugin memory rw`), the model keeps notes about the project in
 a folder of its own, `~/.tapto/projects/<folder>/plugins/memory/`, which it
 knows as `@memory`: decisions you made, conventions, where things live, where
@@ -305,14 +305,49 @@ gives the model its tools for the session:
 A plugin loaded read-only does not offer its writing tools at all; loading it
 again with `rw` adds them. Its tools are named `<plugin>_...`, and a path a
 tool takes goes through the same rules as the editor's before the plugin sees
-it, so a plugin reaches only what the model could reach anyway. `plugins =
-image:ro, jira:rw` in the config loads them at every start, and the plugins of
-a session come back with `/resume`. A Release build on Windows loads only a
+it, so a plugin reaches only what the model could reach anyway. The plugins of
+a session come back with `/resume`.
+
+To load a plugin at every start, give it a line of its own in the config, with
+whatever comment you want above it:
+
+```
+# Notes the model keeps per project, in @memory.
+plugin.memory = rw
+
+# Jira read-only: search and read issues, change nothing.
+plugin.jira = ro
+```
+
+The value is `ro`, `rw` or `off`. Like any key, a project's value wins over
+yours, so `tapto-code config set plugin.jira off` in a project turns off one
+your global config loads there. `config set` refuses a plugin that is not
+installed (except for `off`). A Release build on Windows loads only a
 plugin signed with the certificate that signed tapto-code itself. A plugin may
 keep a folder of its own per project, `~/.tapto/projects/<folder>/plugins/<plugin>/`,
 which the model knows as `@<plugin>` and reaches with its file editor, read-only
 unless the plugin is loaded `rw`; `/remove-plugin` takes it away again and
 leaves its files where they are.
+
+**Skills.** With `/add-plugin skills` (or `plugin.skills = ro`), the model gets
+the skills in `~/.tapto/plugins/skills/`, which it knows as `@skills` and reads
+but never writes. A skill is a folder with a `SKILL.md` in it, the layout of
+Anthropic's skills, with any other files it needs beside it; or a single `.md`
+file. Its front matter names it and says when to use it:
+
+```
+---
+name: release-notes
+description: Write the release notes for a version from its commits.
+---
+```
+
+The system prompt lists every skill by name and description (a file without
+front matter is listed by its first line), and the model reads the one a task
+calls for. A command a skill mentions still runs only if it is allow-listed.
+`tapto-code --global config set skills-folder <absolute path>` uses another
+folder; set by policy, it points everyone at the organization's. Skills are
+never read from the project, so a cloned repository cannot add any.
 
 A plugin's settings are config keys named after it, which `config set`
 accepts while the plugin is installed. The `jira` plugin needs two:
@@ -359,7 +394,7 @@ Chat config keys:
 | `system-prompt-append` | no | unset — added after the prompt, so project rules don't need a copy of the built-in one |
 | `system-prompt-append-file` | no | unset — same, from a text file; added after `system-prompt-append` |
 | `trace-file`    | no       | unset — set to a path to enable diagnostic logging  |
-| `plugins`       | no       | unset — plugins to load at every start, `name:ro` or `name:rw`, comma-separated |
+| `plugin.<name>` | no       | unset — `ro`, `rw` or `off`: load that plugin at every start, one key per plugin |
 
 ### System prompt
 

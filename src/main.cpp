@@ -161,7 +161,7 @@ const char* kUsage =
     "  allow-user-commands = 0             they are the only ones\n"
     "and confine plugins:\n"
     "  allowed-plugins = image, jira       only these may be loaded\n"
-    "  allow-user-plugins = 0              only those its own 'plugins' names\n";
+    "  allow-user-plugins = 0              only those its own plugin.<name> load\n";
 
 struct Args {
     std::optional<Level> level;
@@ -206,11 +206,16 @@ bool is_supported_config_key(const std::string& key) {
         "max-output-tokens", "max-tool-iterations", "system-prompt", "system-prompt-file",
         "system-prompt-append", "system-prompt-append-file", "trace-file", "print-cot",
         "connection-timeout", "read-timeout",
-        "reasoning-effort", "plugins",
+        "reasoning-effort",
     };
     for (const char* k : kKeys) {
         if (key == k) return true;
     }
+    // plugin.<name> = ro | rw | off: which plugins load at start.
+    if (const std::string name = plugin_of_key(key); !name.empty())
+        return name.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789-") ==
+                   std::string::npos &&
+               name[0] >= 'a' && name[0] <= 'z';
     for (const char* k : kProviderBlockKeys) {
         if (is_valid_provider_name(provider_name_of_key(key, k))) return true;
     }
@@ -221,7 +226,7 @@ const char* kSupportedKeysHelp =
     "provider, provider-url, model, api-key, "
     "max-output-tokens, max-tool-iterations, system-prompt, system-prompt-file, "
     "system-prompt-append, system-prompt-append-file, trace-file, print-cot, "
-    "connection-timeout, read-timeout, plugins (image:ro, jira:rw), "
+    "connection-timeout, read-timeout, plugin.<name> (ro, rw or off), "
     "per provider <name>-provider-type, <name>-provider-url, <name>-model, "
     "<name>-api-key, <name>-reasoning-effort, "
     "and the keys of an installed plugin, <plugin>-... (jira-url, jira-api-token, ...)";
@@ -247,6 +252,34 @@ int cmd_set(const Args& a) {
                             (why.empty() ? std::string() : " (" + why + ")") +
                             ".\n  supported keys: " + kSupportedKeysHelp);
             return 2;
+        }
+    }
+    // plugin.<name>: a mode, and for one that loads, a plugin that is there
+    // and that the policy lets the user load. "off" may name any plugin, so a
+    // project can turn off one the user's own config loads.
+    if (const std::string name = plugin_of_key(a.positional[1]); !name.empty()) {
+        const auto mode = parse_plugin_mode(a.positional[2]);
+        if (!mode) {
+            ui::print_error(a.positional[1] + " takes ro, rw or off, not '" + a.positional[2] +
+                            "'");
+            return 2;
+        }
+        if (*mode != PluginMode::Off) {
+            const auto installed = available_plugins();
+            if (std::find(installed.begin(), installed.end(), name) == installed.end()) {
+                std::string list;
+                for (const auto& n : installed) list += (list.empty() ? "" : ", ") + n;
+                ui::print_error("there is no plugin '" + name + "' in " +
+                                plugin_directory().u8string() +
+                                (list.empty() ? std::string(" (none is installed)")
+                                              : " (installed: " + list + ")"));
+                return 2;
+            }
+            if (std::string why = plugin_policy_refusal(name, false, policy_entries());
+                !why.empty()) {
+                ui::print_error("plugin '" + name + "' cannot be loaded: " + why);
+                return 2;
+            }
         }
     }
     Level level = a.level.value_or(Level::Local);
@@ -1549,17 +1582,22 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
     set_granted_folders(&folders); // outlives the chat loop below
     // A plugin's own folder joins the set as @<plugin> (the memory's @memory).
     plugins.set_folders(&folders);
-    // The plugins the configuration asks for, `plugins = image:ro, jira:rw`.
-    // One the policy itself names loads even with allow-user-plugins = 0.
+    // The plugins the configuration asks for, one `plugin.<name> = ro | rw |
+    // off` each, the most specific level's value winning. One the policy sets
+    // loads even with allow-user-plugins = 0.
     for (const auto& e : effective_config()) {
-        if (e.key != "plugins") continue;
-        std::string err;
-        for (const auto& [name, writable] : parse_plugin_list(e.value, err)) {
-            if (std::string why = plugins.add(name, writable, e.origin == Level::Policy);
-                !why.empty())
-                ui::print_warning("plugin not loaded: " + why);
+        const std::string name = plugin_of_key(e.key);
+        if (name.empty() || e.value.empty()) continue; // empty counts as unset
+        const auto mode = parse_plugin_mode(e.value);
+        if (!mode) {
+            ui::print_warning(e.key + " = " + e.value + ": not ro, rw or off, so not loaded");
+            continue;
         }
-        if (!err.empty()) ui::print_warning("plugins = " + e.value + ": " + err);
+        if (*mode == PluginMode::Off) continue;
+        if (std::string why = plugins.add(name, *mode == PluginMode::Rw,
+                                          e.origin == Level::Policy);
+            !why.empty())
+            ui::print_warning("plugin not loaded: " + why);
     }
     auto rebuild_tools_and_prompt = [&]() {
         context.tools = builtin_tools();

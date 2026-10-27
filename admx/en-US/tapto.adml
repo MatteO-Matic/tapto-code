@@ -115,17 +115,6 @@ Not configured: %ProgramFiles%\Centlake\tapto\scripts. The tapto-code installer 
 
 Writes the config key "script-folder".</string>
 
-      <string id="LoadedPlugins">Plugins to load</string>
-      <string id="LoadedPlugins_Explain">Plugins tapto-code loads at every start, as a comma-separated list of name:mode, for example "image:ro, jira:rw". A plugin is a module in the "plugins" folder beside tapto-code.exe; it adds tools for the AI agent. "ro" offers only the plugin's tools that read; "rw" also offers those that change things (create a ticket, write a file). A name without a mode is ro.
-
-Release builds load only a plugin signed with the certificate that signed tapto-code itself.
-
-Enabled: these plugins load in every session, and the user cannot change this setting. The user may still load others with /add-plugin unless "Allow user-loaded plugins" is disabled or "Allowed plugins" leaves them out.
-
-Not configured: the user's own configuration decides.
-
-Writes the config key "plugins".</string>
-
       <string id="AllowedPlugins">Allowed plugins</string>
       <string id="AllowedPlugins_Explain">The only plugins tapto-code will load, one name per line, for example "image" or "jira". Applies to plugins loaded by this policy, by the user's configuration and with /add-plugin alike.
 
@@ -136,16 +125,16 @@ Not configured: any installed plugin may be loaded.
 Writes the config key "allowed-plugins".</string>
 
       <string id="AllowUserPlugins">Allow user-loaded plugins</string>
-      <string id="AllowUserPlugins_Explain">Whether users may load plugins themselves, with /add-plugin or their own "plugins" setting.
+      <string id="AllowUserPlugins_Explain">Whether users may load plugins themselves, with /add-plugin or their own plugin.&lt;name&gt; settings.
 
-Disabled: only the plugins named by "Plugins to load" are loaded, in the mode it gives them; /add-plugin is refused.
+Disabled: only the plugins this policy loads are loaded (its plugin.&lt;name&gt; keys, under "Additional settings"), in the mode it gives them; /add-plugin is refused.
 
 Enabled or Not configured: users may load any installed plugin that "Allowed plugins" permits.
 
 Writes the config key "allow-user-plugins".</string>
 
       <string id="AdditionalSettings">Additional settings</string>
-      <string id="AdditionalSettings_Explain">Any other configuration key the programs read, as name and value pairs, for keys this template has no dedicated setting for: trace-file, system-prompt, system-prompt-file (an absolute path), system-prompt-append, system-prompt-append-file (a system prompt set here is not added to by the user's own append keys; set the append keys here to add rules while leaving the prompt to the user), print-cot, or a second provider block (review-provider-type, review-provider-url, review-model, review-api-key).
+      <string id="AdditionalSettings_Explain">Any other configuration key the programs read, as name and value pairs, for keys this template has no dedicated setting for: trace-file, system-prompt, system-prompt-file (an absolute path), system-prompt-append, system-prompt-append-file (a system prompt set here is not added to by the user's own append keys; set the append keys here to add rules while leaving the prompt to the user), print-cot, a second provider block (review-provider-type, review-provider-url, review-model, review-api-key), or a plugin to load at every start: plugin.jira with the value ro (only its tools that read), rw (also those that change things) or off (never loaded, whatever the user's configuration says). A plugin is a module in the "plugins" folder beside tapto-code.exe, and a Release build loads only one signed with the certificate that signed tapto-code itself. A plugin's own settings go here too, such as jira-url or skills-folder.
 
 Each key listed here is locked for the user. The value names are exactly the keys the programs document; run "tapto-code --help" for the list.
 
@@ -184,10 +173,6 @@ Never put an API key value here; see "Work provider" for the references to use i
 
       <presentation id="ScriptFolder">
         <textBox refId="ScriptFolder_Path"><label>Folder (an absolute path):</label></textBox>
-      </presentation>
-
-      <presentation id="LoadedPlugins">
-        <textBox refId="LoadedPlugins_Value"><label>Plugins (name:ro or name:rw, comma-separated):</label></textBox>
       </presentation>
 
       <presentation id="AllowedPlugins">

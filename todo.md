@@ -411,7 +411,7 @@ until exit, which is always safe.
 ## Commands and config
 
 `/add-plugin <name> [ro|rw]`, `/list-plugins`, `/remove-plugin <name>`,
-worded like the folder commands. `plugins = jira:ro` in config for a project
+worded like the folder commands. `plugin.jira = ro` in config for a project
 that always wants it.
 
 ## Why not STL across the boundary, and why libtapto stays static
@@ -554,6 +554,43 @@ the tool-name rule and the prompt alone; Jira then adds config, secrets, rw.
       - API v3 (Cloud) wants descriptions and comments in Atlassian
         Document Format; plain text is what v2 (Data Center) takes. As in
         tapto-jira.
+- [x] `plugin.<name> = ro | rw | off`, one key per plugin, in place of
+      `plugins = image:ro, jira:rw`. Decided 27 Oct: a list leaves no room
+      for a comment on each plugin, and one key per plugin lets a project or
+      a policy change one without restating the rest (`off` undoes a less
+      specific level's). `plugin.` cannot clash with a plugin's own
+      `<plugin>-...` keys, since a plugin name has no dot. `config set`
+      checks the mode, and for ro/rw that the plugin is installed and the
+      policy allows it. Comments by hand: `config set` writes none. The ADMX
+      `LoadedPlugins` policy is gone; a policy sets `plugin.<name>` through
+      Additional settings. `plugins =` was never released, so not read.
+- [x] `skills` plugin (`plugins/skills/skills.cpp`), discussed with users
+      27 Oct: skill files the user or admin drops in a folder, an index in
+      the prompt, the model reads `@skills` for the rest. No tools. The
+      folder is per user, `~/.tapto/plugins/skills/`, or the absolute path in
+      `skills-folder` (policy can set it; must exist, never made); never the
+      project's, so a clone cannot plant instructions. Read-only to the model
+      whatever the plugin's mode. A skill is `<dir>/SKILL.md` (Anthropic's
+      layout) or a top-level `.md`; `name`/`description` from front matter
+      (plain, quoted, or a `>`/`|` block), else the file's first line. Index
+      capped at 8 KiB, 300 bytes a description, fenced in `<skills-index>`;
+      links and dot-files skipped. Framed as instructions from the user or
+      organization, below the system prompt and the user's messages.
+      - Loader: a folder may be `{"mode", "scope": "user", "key"}` besides
+        `"rw"`: per user at `plugin_user_folder()`, or where one of the
+        plugin's own config keys says.
+      - Open: one folder only, so a policy `skills-folder` replaces the
+        user's own skills rather than adding the organization's to them.
+- [ ] General instructions (a code style guide, say), asked for by a user
+      27 Oct: not a plugin. The core's `system-prompt-append` and
+      `system-prompt-append-file` already do it, and a policy key cannot be
+      dropped with /remove-plugin as a plugin can. But checked the same day,
+      they do not stack: like every key, one value wins, policy over local
+      over global over system. So a project's `system-prompt-append-file`
+      hides the user's own, and a policy one hides both, silently. To decide:
+      append every scope's (system, global, local, then policy), which
+      changes how a key resolves and so counts as breaking by the CHANGELOG's
+      rules; and maybe a folder of instruction files in place of one file.
 - [ ] Installer: `plugins\` in the MSI, the plugin signed in
       the same job; plugins as their own feature or their own MSI, to decide.
 - [ ] Open: tapto-jira as a thin host around the same plugin, or retired.
@@ -561,14 +598,14 @@ the tool-name rule and the prompt alone; Jira then adds config, secrets, rw.
       it out with `allowed-plugins`: `plugins/memory/memory.cpp`, no tools, its
       folder `@memory` and its rules and index from `ITaptoPluginPrompt`;
       `src/memory.cpp` and `tapto/memory.h` are gone from the core. Decided
-      27 Oct: not loaded by default, like any plugin (`plugins = memory:rw`),
+      27 Oct: not loaded by default, like any plugin (`plugin.memory = rw`),
       and no `:off`. Loaded ro the prompt says the memory is read-only. On its
       first configure with an empty folder it moves the 1.2.0 memory
       (`projects/<p>/memory/`) in. test-memory loads the module.
       - Breaking for 1.2.0 users: the memory is off until they add the
         plugin. In CHANGELOG under Changed.
-      - `plugins = memory` alone is ro, as for every plugin: the model reads
-        its notes and cannot write them.
+      - `plugin.memory = ro` lets the model read its notes and not write
+        them.
 
 ---
 

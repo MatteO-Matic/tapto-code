@@ -150,16 +150,8 @@
       </elements>
     </policy>
 
-    <!-- plugins = image:ro, jira:rw -->
-    <policy name="LoadedPlugins" class="Both" displayName="$(string.LoadedPlugins)"
-            explainText="$(string.LoadedPlugins_Explain)" presentation="$(presentation.LoadedPlugins)"
-            key="SOFTWARE\Policies\Centlake\tapto">
-      <parentCategory ref="Plugins" />
-      <supportedOn ref="windows:SUPPORTED_Windows7" />
-      <elements>
-        <text id="LoadedPlugins_Value" valueName="plugins" />
-      </elements>
-    </policy>
+    <!-- plugin.<name> = ro | rw | off has no policy of its own: one key per
+         plugin, set through "Additional settings" below. -->
 
     <!-- allowed-plugins = a, b, c -->
     <policy name="AllowedPlugins" class="Both" displayName="$(string.AllowedPlugins)"

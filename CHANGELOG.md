@@ -52,14 +52,16 @@ breaking changes and the patch number everything else.)
   tapto-code. `/add-plugin <name>` gives the model a plugin's tools that only
   read, `/add-plugin <name> rw` also those that change things, and
   `/list-plugins` and `/remove-plugin <name>` show and take them away.
-  `plugins = image:ro, jira:rw` in the config loads them at every start, and
-  `/resume` brings back a session's plugins. Administrators can limit them with
+  `plugin.jira = rw` (or `ro`) in the config loads one at every start, with a
+  line of its own for a comment above it, and `plugin.jira = off` in a
+  project's config turns off one your own config loads. `/resume` brings back
+  a session's plugins. Administrators can limit them with
   the `allowed-plugins` and `allow-user-plugins` policies.
 - `command add --note "..."` and `/add-command <name> <cmd> --note "..."`
   attach a short instruction to a command — which arguments it expects, or
   what to pass them. The note is shown to the model alongside the command and
   is never run.
-- With a model that can see, `/add-plugin image` (or `plugins = image:ro` in
+- With a model that can see, `/add-plugin image` (or `plugin.image = ro` in
   the config) lets it look at image files: PNG, JPEG, WebP, BMP, GIF and TGA.
   Each image is normalised to PNG and its longest side capped at 1600 pixels;
   larger images are down-scaled before being shown.
@@ -72,11 +74,17 @@ breaking changes and the patch number everything else.)
   `jira-api-version` are optional.
 - `config set` accepts the settings of an installed plugin, such as
   `jira-url`, and `config list` masks the ones the plugin marks secret.
+- `/add-plugin skills` (or `plugin.skills = ro` in the config) gives the model
+  the skills you keep in `~/.tapto/plugins/skills/`: a `SKILL.md` in a folder
+  of its own, or a `.md` file, with a name and a description. The model sees
+  the list and reads a skill when a task matches it, and never changes them.
+  `config set skills-folder <path>` uses another folder, and an administrator
+  can set it to one the organization keeps.
 
 ### Changed
 
 - The model's notes per project are now the memory plugin, and are off until
-  you turn them on: `plugins = memory:rw` in the config, or `/add-plugin memory
+  you turn them on: `plugin.memory = rw` in the config, or `/add-plugin memory
   rw` in a session (`ro` lets the model read its notes but not change them).
   The notes move to `~/.tapto/projects/<project>/plugins/memory/` the first
   time, and administrators can leave the memory out with `allowed-plugins`.

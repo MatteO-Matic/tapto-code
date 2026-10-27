@@ -38,13 +38,14 @@ class FolderSet;
 //  - Config: the plugin's keys are named "<plugin>-...", so it cannot read a
 //    core key or another plugin's. A key it declares secret is resolved here
 //    (wincred:, env:, cmd:) and handed over as its value in Configure.
-//  - Folder: a plugin may declare one folder of its own, per project, at
-//    plugin_folder(): the model reaches it as "@<plugin>" with the core's
-//    path rules and editor, read-only unless both the plugin and the folder
-//    are rw. It goes with /remove-plugin. "tmp" is no plugin's name, since
-//    @tmp is the core's.
+//  - Folder: a plugin may declare one folder of its own, per project at
+//    plugin_folder() or per user at plugin_user_folder(), or the one a config
+//    key of its own names (an absolute path, which the policy may set): the
+//    model reaches it as "@<plugin>" with the core's path rules and editor,
+//    read-only unless both the plugin and the folder are rw. It goes with
+//    /remove-plugin. "tmp" is no plugin's name, since @tmp is the core's.
 //  - Policy: allowed-plugins (only these names) and allow-user-plugins = 0
-//    (only the plugins the policy's own `plugins` key names).
+//    (only the plugins the policy's own plugin.<name> keys load).
 // ---------------------------------------------------------------------------
 
 // The folder plugins are loaded from: plugin_directory_for() the running
@@ -61,14 +62,25 @@ std::filesystem::path plugin_directory_for(const std::filesystem::path& exe);
 // The names of the modules in plugin_directory().
 std::vector<std::string> available_plugins();
 
-// A `plugins` config value, "image:ro, jira:rw", as (name, writable) pairs;
-// a name without a mode is ro. Sets `error` for an entry it cannot read and
-// skips it.
-std::vector<std::pair<std::string, bool>> parse_plugin_list(const std::string& value,
-                                                            std::string& error);
+// The config says which plugins load at start, one key per plugin, so each
+// can have a comment of its own above it and a more specific level can
+// change one without restating the rest:
+//
+//   # Notes the model keeps per project, in @memory.
+//   plugin.memory = rw
+//
+// The name after "plugin." (which a plugin's own "<plugin>-..." keys never
+// start with), or "" when `key` is not such a key. Not checked to be a valid
+// plugin name.
+std::string plugin_of_key(const std::string& key);
+
+// A plugin.<name> value: "ro", "rw", or "off" (not loaded; how a project or
+// a policy undoes a less specific level's). Nothing for any other value.
+enum class PluginMode { Off, Ro, Rw };
+std::optional<PluginMode> parse_plugin_mode(const std::string& value);
 
 // Why policy forbids loading `name`, or "" when it is allowed. `by_policy`
-// is true when the policy's own `plugins` key asks for it.
+// is true when the policy's own plugin.<name> key asks for it.
 std::string plugin_policy_refusal(const std::string& name, bool by_policy,
                                   const std::vector<Config::Entry>& policy);
 
@@ -90,6 +102,9 @@ std::optional<PluginConfigKey> plugin_config_key(const std::string& key, std::st
 // config: ~/.tapto/projects/<project>/plugins/<name>/. Empty without a
 // project (no readable working directory).
 std::filesystem::path plugin_folder(const std::string& name);
+
+// The folder a plugin whose folder is per user gets: ~/.tapto/plugins/<name>/.
+std::filesystem::path plugin_user_folder(const std::string& name);
 
 class Plugins {
 public:

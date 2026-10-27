@@ -6,7 +6,7 @@
 // An image file is binary, so the core's text tools refuse it, and a model
 // that can see needs another way in. Not every server can see, though, and a
 // tool offered to one that cannot is noise, so this is a plugin: loaded with
-// /add-plugin image, or `plugins = image:ro`, where it is wanted.
+// /add-plugin image, or `plugin.image = ro`, where it is wanted.
 //
 // image_read decodes the file, re-encodes it as PNG (every provider takes
 // PNG; it also normalises JPEG/WebP/BMP/... into one shape) and hands the

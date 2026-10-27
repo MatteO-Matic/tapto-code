@@ -2,7 +2,7 @@
 // Copyright 2026 Centlake Software AB
 
 // The jira plugin: the Jira tools from tapto-jira, so one session can read the
-// code and the tickets it answers to (/add-plugin jira, or `plugins = jira:ro`).
+// code and the tickets it answers to (/add-plugin jira, or `plugin.jira = ro`).
 //
 // Loaded ro it offers the tools that only read: projects, issue types,
 // sprints, search, an issue, its transitions, and opening an issue in the

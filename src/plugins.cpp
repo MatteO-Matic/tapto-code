@@ -447,6 +447,8 @@ struct Plugins::Loaded {
     std::set<std::string> secret_keys;
     std::vector<Tool> tools;
     std::string folder_mode;   // "ro" or "rw" when it declares a folder
+    bool folder_per_user = false; // ~/.tapto/plugins/<name>/, not the project's
+    std::string folder_key;    // a config key naming the folder instead, or ""
     std::string folder_label;  // "@<name>" once the folder is in the set
     fs::path folder_root;      // the folder as the set holds it
 
@@ -545,9 +547,20 @@ std::string read_description(const std::string& text, Plugins::Loaded& l, bool c
         }
     }
     if (d.contains("folder")) {
-        const json f = d["folder"];
-        if (f != "ro" && f != "rw") return "its folder must be \"ro\" or \"rw\"";
-        l.folder_mode = f.get<std::string>();
+        // "rw", or {"mode": "ro", "scope": "user", "key": "<plugin>-folder"}.
+        const json f = d["folder"].is_object() ? d["folder"] : json{{"mode", d["folder"]}};
+        const json mode = f.value("mode", json());
+        if (mode != "ro" && mode != "rw") return "its folder's mode must be \"ro\" or \"rw\"";
+        l.folder_mode = mode.get<std::string>();
+        const std::string scope = f.value("scope", std::string("project"));
+        if (scope != "project" && scope != "user")
+            return "its folder's scope must be \"project\" or \"user\"";
+        l.folder_per_user = scope == "user";
+        l.folder_key = f.value("key", std::string());
+        if (!l.folder_key.empty() &&
+            std::find(l.config_keys.begin(), l.config_keys.end(), l.folder_key) ==
+                l.config_keys.end())
+            return "its folder's key '" + l.folder_key + "' is not one of its config keys";
     }
 
     if (!d.contains("tools") || !d["tools"].is_array()) return "it lists no tools";
@@ -618,6 +631,10 @@ fs::path plugin_folder(const std::string& name) {
     return dir.empty() ? fs::path() : dir / "plugins" / name;
 }
 
+fs::path plugin_user_folder(const std::string& name) {
+    return global_dir() / "plugins" / name;
+}
+
 fs::path plugin_directory_for(const fs::path& exe) {
     const fs::path dir = exe.parent_path();
 #ifndef _WIN32
@@ -663,23 +680,17 @@ std::vector<std::string> available_plugins() {
     return names;
 }
 
-std::vector<std::pair<std::string, bool>> parse_plugin_list(const std::string& value,
-                                                            std::string& error) {
-    std::vector<std::pair<std::string, bool>> out;
-    for (const std::string& item : split_list(value)) {
-        std::string name = item, mode = "ro";
-        if (const std::size_t colon = item.find(':'); colon != std::string::npos) {
-            name = trim(item.substr(0, colon));
-            mode = trim(item.substr(colon + 1));
-        }
-        if (!is_valid_plugin_name(name) || (mode != "ro" && mode != "rw")) {
-            error += (error.empty() ? "" : "; ") + std::string("'") + item +
-                     "' is not <name>[:ro|rw]";
-            continue;
-        }
-        out.emplace_back(name, mode == "rw");
-    }
-    return out;
+std::string plugin_of_key(const std::string& key) {
+    static const std::string kPrefix = "plugin.";
+    return key.rfind(kPrefix, 0) == 0 ? key.substr(kPrefix.size()) : std::string();
+}
+
+std::optional<PluginMode> parse_plugin_mode(const std::string& value) {
+    const std::string v = trim(value);
+    if (v == "ro") return PluginMode::Ro;
+    if (v == "rw") return PluginMode::Rw;
+    if (v == "off") return PluginMode::Off;
+    return std::nullopt;
 }
 
 std::string plugin_policy_refusal(const std::string& name, bool by_policy,
@@ -702,7 +713,7 @@ std::string plugin_policy_refusal(const std::string& name, bool by_policy,
     if (!by_policy) {
         if (const std::string* user = find("allow-user-plugins"); user && is_false(*user))
             return "your organization's policy loads only the plugins it names itself "
-                   "(its 'plugins' setting)";
+                   "(its plugin." + name + " setting)";
     }
     return "";
 }
@@ -713,17 +724,29 @@ Plugins::Plugins() {
 
 namespace {
 
-// Puts the plugin's folder in `folders` as @<name>, made when it is not there
-// yet. "" on success.
+// Puts the plugin's folder in `folders` as @<name>. The folder its key names
+// must be there already; the default one is made when it is not. "" on
+// success.
 std::string add_folder(Plugins::Loaded& p, FolderSet* folders) {
     if (!folders) return "it wants a folder, and this tapto-code has none to give";
-    const fs::path dir = plugin_folder(p.name);
-    if (dir.empty())
-        return "it wants a folder, and there is no project (the working directory "
-               "could not be read)";
     std::error_code ec;
-    fs::create_directories(dir, ec);
-    if (ec) return "cannot make its folder " + dir.u8string() + ": " + ec.message();
+    fs::path dir;
+    if (auto set = p.folder_key.empty() ? std::nullopt : get_effective(p.folder_key)) {
+        // A setting, perhaps the policy's: the user's or the admin's own
+        // folder, which is never made here.
+        dir = fs::u8path(*set);
+        if (!dir.is_absolute())
+            return p.folder_key + " must be an absolute path, not " + *set;
+        if (!fs::is_directory(dir, ec))
+            return p.folder_key + " names " + *set + ", which is not a folder";
+    } else {
+        dir = p.folder_per_user ? plugin_user_folder(p.name) : plugin_folder(p.name);
+        if (dir.empty())
+            return "it wants a folder, and there is no project (the working directory "
+                   "could not be read)";
+        fs::create_directories(dir, ec);
+        if (ec) return "cannot make its folder " + dir.u8string() + ": " + ec.message();
+    }
     const std::string label = "@" + p.name;
     const std::string err = folders->add_system(label, dir.u8string(), p.folder_writable(),
                                                 "the " + p.name + " plugin's folder");

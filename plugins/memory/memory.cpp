@@ -14,7 +14,7 @@
 // a memory written mid-session is picked up.
 //
 // It is a plugin so an administrator can leave it out (allowed-plugins), and
-// a user turns it on per project or for all of them: `plugins = memory:rw`.
+// a user turns it on per project or for all of them: `plugin.memory = rw`.
 //
 // Before 1.3.0 the core kept the memory in ~/.tapto/projects/<project>/memory/.
 // The first time the plugin is configured with an empty folder, it moves what

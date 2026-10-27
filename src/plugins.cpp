@@ -525,6 +525,11 @@ std::string read_description(const std::string& text, Plugins::Loaded& l, bool c
                                     : k.is_object() ? k.value("name", std::string())
                                                     : std::string();
             if (key.empty()) return "a config key has no name";
+            // The tool-name rule, for keys: a plugin can neither set a core
+            // key nor another plugin's, and `config set` finds the plugin
+            // from the key (plugin_config_key).
+            if (key.rfind(name + "-", 0) != 0 || key.size() == name.size() + 1)
+                return "its config key '" + key + "' is not named " + name + "-<something>";
             l.config_keys.push_back(key);
             if (k.is_object() && k.value("secret", false)) l.secret_keys.insert(key);
         }
@@ -684,9 +689,9 @@ Plugins::Plugins() {
 
 namespace {
 
-// Asks the loaded module for its plugin, reads its description and configures
-// it. "" when it is ready to offer its tools.
-std::string attach(Plugins::Loaded& p, bool check_name) {
+// Asks the loaded module for its plugin, reads its description and, when
+// `configure`, configures it. "" when it is ready to offer its tools.
+std::string attach(Plugins::Loaded& p, bool check_name, bool configure = true) {
     auto get = reinterpret_cast<GetPluginFn>(p.module.sym(kGetPluginExport));
     p.can_unload = reinterpret_cast<CanUnloadNowFn>(p.module.sym(kCanUnloadNowExport));
     if (!get || !p.can_unload)
@@ -701,6 +706,7 @@ std::string attach(Plugins::Loaded& p, bool check_name) {
     TaptoString desc;
     if (p.plugin->Describe(desc.out()) != scom::OK) return "its Describe failed";
     if (std::string why = read_description(desc.str(), p, check_name); !why.empty()) return why;
+    if (!configure) return "";
     std::string cfg_error;
     const std::string cfg = plugin_config(p, cfg_error);
     if (!cfg_error.empty()) return cfg_error;
@@ -719,6 +725,53 @@ void finish(std::unique_ptr<Plugins::Loaded>& l) {
 }
 
 } // namespace
+
+std::optional<PluginConfigKey> plugin_config_key(const std::string& key, std::string& why,
+                                                 const fs::path& dir) {
+    if (!plugin_host()) plugin_host() = &core_host();
+    // A plugin name may itself contain '-', so each prefix is a candidate:
+    // "my-plugin-url" is my's key or my-plugin's.
+    for (std::size_t dash = key.find('-'); dash != std::string::npos;
+         dash = key.find('-', dash + 1)) {
+        const std::string name = key.substr(0, dash);
+        if (dash + 1 == key.size() || !is_valid_plugin_name(name)) continue;
+        const fs::path file = dir / (name + kModuleExt);
+        std::error_code ec;
+        if (!fs::is_regular_file(file, ec)) continue;
+        // allowed-plugins applies; allow-user-plugins does not, since the
+        // policy's own `plugins` may load it and still leave its keys to the
+        // user.
+        if (std::string refusal = plugin_policy_refusal(name, /*by_policy=*/true, policy_entries());
+            !refusal.empty()) {
+            why = "the " + name + " plugin is not allowed: " + refusal;
+            continue;
+        }
+        auto l = std::make_unique<Plugins::Loaded>();
+        l->name = name;
+        l->file = file;
+        std::string error;
+        if (!load_module(file, l->module, error)) {
+            why = error;
+            continue;
+        }
+        const std::string bad = attach(*l, /*check_name=*/true, /*configure=*/false);
+        std::optional<PluginConfigKey> found;
+        if (!bad.empty()) {
+            why = "plugin '" + name + "': " + bad;
+        } else if (std::find(l->config_keys.begin(), l->config_keys.end(), key) !=
+                   l->config_keys.end()) {
+            found = PluginConfigKey{name, l->secret_keys.count(key) > 0};
+        } else {
+            std::string keys;
+            for (const auto& k : l->config_keys) keys += (keys.empty() ? "" : ", ") + k;
+            why = "the " + name + " plugin has no key '" + key + "' (its keys: " +
+                  (keys.empty() ? std::string("none") : keys) + ")";
+        }
+        finish(l);
+        if (found) return found;
+    }
+    return std::nullopt;
+}
 
 Plugins::~Plugins() {
     for (auto& l : m_loaded) finish(l);

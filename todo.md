@@ -500,10 +500,18 @@ the tool-name rule and the prompt alone; Jira then adds config, secrets, rw.
       keys and ADMX; plugins in `session.json`. Tested with
       `tests/plugin/probe.cpp`.
 - [ ] Loader follow-ups:
-      - `config set` accepting a plugin's declared keys. It runs without
-        loading plugins, so it needs the keys from somewhere: Describe the
-        installed modules (loads code to set a key), or a manifest beside
-        each module (`jira.json`). Needed by Jira, not by image.
+      - [x] `config set` accepting a plugin's declared keys. Decided 27 Oct:
+        neither of the two options above as they stood. A plugin's keys must
+        be named `<plugin>-...` (the tool-name rule, for keys; the loader
+        refuses a plugin that breaks it), so the key names its module, and
+        `config set` describes that one module: loaded through the same
+        signature check, never configured, freed again
+        (`plugin_config_key`). Its declaration says whether the key is
+        secret, so the plaintext warning and `config list`'s mask follow it.
+        No manifest, which would be an unsigned second copy of what
+        Describe says. An unsigned Release build refuses the key and says
+        why. `config list` masks a non-core key no installed plugin claims
+        when its name ends in -token/-password/-secret/-key.
       - Plugin folders (`folders` in Describe, `@<plugin>` labels): logged
         and ignored for now. Needed by the memory plugin.
       - The signed path is untested: needs a build signed with the eToken.
@@ -520,8 +528,25 @@ the tool-name rule and the prompt alone; Jira then adds config, secrets, rw.
       decoding, where the core tool decoded first. Built into
       `<build>/plugins/`, installed to `bin/plugins`. Tests moved from
       test-edits to test-plugins.
-- [ ] `jira.dll`: tapto-jira's `jira.cpp` behind `ITaptoPlugin`, its read
-      tools ro and create/update/comment/transition rw.
+- [x] `jira.dll`: tapto-jira's `jira.cpp` behind `ITaptoPlugin`
+      (`plugins/jira/jira.cpp`), its read tools ro and
+      create/update/comment/transition rw. Its own httplib + OpenSSL, the
+      pins libtapto brings; trace through `ITaptoHost::Log`, cancel checked
+      between retries, the result cap left to overflow, the server and
+      default project in `ITaptoPluginPrompt`. The fixed prompt tells the
+      model that ticket text is data, not instructions. Two request bodies
+      fixed on the way, to the shape Jira documents: create puts the fields
+      under `fields`, and a transition's fields go beside `transition`.
+      tapto-jira still has the old shapes. Tested in test-plugins against a
+      fake Jira on localhost; not yet against a real server.
+      - Not ported: the `JIRA_API_TOKEN` fallback (`jira-api-token
+        env:JIRA_API_TOKEN` does it through the host) and tapto-jira's
+        folders for issue text (the core's editor reads files already).
+      - Settings are read at load; changing one needs /remove-plugin and
+        /add-plugin. A `config set` inside the chat could reconfigure.
+      - API v3 (Cloud) wants descriptions and comments in Atlassian
+        Document Format; plain text is what v2 (Data Center) takes. As in
+        tapto-jira.
 - [ ] Installer: `plugins\` in the MSI, the plugin signed in
       the same job; plugins as their own feature or their own MSI, to decide.
 - [ ] Open: tapto-jira as a thin host around the same plugin, or retired.

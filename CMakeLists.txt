@@ -196,6 +196,21 @@ endfunction()
 tapto_code_plugin(tapto-plugin-image image plugins/image/image.cpp)
 target_link_libraries(tapto-plugin-image PRIVATE stb_headers nlohmann_json::nlohmann_json)
 
+# jira: the Jira tools from tapto-jira; its own HTTPS client (httplib and
+# OpenSSL, the same pins the library brings). On Windows httplib reads the
+# system's root certificates through crypt32, and the browser opens through
+# shell32/ole32.
+tapto_code_plugin(tapto-plugin-jira jira plugins/jira/jira.cpp)
+# The library's OpenSSL targets are local to its directory; its choice of
+# OpenSSL is in the cache, so this finds the same one.
+find_package(OpenSSL REQUIRED)
+target_link_libraries(tapto-plugin-jira PRIVATE
+  httplib::httplib OpenSSL::SSL OpenSSL::Crypto nlohmann_json::nlohmann_json)
+target_compile_definitions(tapto-plugin-jira PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
+if(WIN32)
+  target_link_libraries(tapto-plugin-jira PRIVATE crypt32 shell32 ole32 ws2_32)
+endif()
+
 # --- Tests ------------------------------------------------------------------
 # Plain executables with assertions of their own, so `ctest` needs no test
 # framework fetched or installed. Run with: ctest --test-dir build --output-on-failure
@@ -325,12 +340,13 @@ if(WIN32)
 else()
   target_link_libraries(test-plugins PRIVATE ${CMAKE_DL_LIBS})
 endif()
-add_dependencies(test-plugins tapto-probe tapto-probe-misnamed tapto-plugin-image)
+add_dependencies(test-plugins tapto-probe tapto-probe-misnamed tapto-plugin-image
+  tapto-plugin-jira)
 tapto_code_warnings(test-plugins)
 
 add_test(NAME plugins COMMAND test-plugins
   $<TARGET_FILE:tapto-probe> $<TARGET_FILE:tapto-probe-misnamed>
-  $<TARGET_FILE:tapto-plugin-image>)
+  $<TARGET_FILE:tapto-plugin-image> $<TARGET_FILE:tapto-plugin-jira>)
 
 # Markdown table rendering: wrapping (not clipping), alignment, inline styling
 # and CJK width are exercised at explicit widths via render_markdown (pure,

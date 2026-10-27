@@ -63,6 +63,15 @@ breaking changes and the patch number everything else.)
   the config) lets it look at image files: PNG, JPEG, WebP, BMP, GIF and TGA.
   Each image is normalised to PNG and its longest side capped at 1600 pixels;
   larger images are down-scaled before being shown.
+- `/add-plugin jira` lets the model read your Jira server alongside the code:
+  search issues with JQL, read an issue, its project, issue types, sprints and
+  transitions, and open an issue in your browser. `/add-plugin jira rw` also
+  lets it create and update issues, comment, and move them through the
+  workflow. Point it at your server with `config set jira-url <url>` and
+  `config set jira-api-token wincred:<name>`; `jira-email`, `jira-project` and
+  `jira-api-version` are optional.
+- `config set` accepts the settings of an installed plugin, such as
+  `jira-url`, and `config list` masks the ones the plugin marks secret.
 
 ### Fixed
 

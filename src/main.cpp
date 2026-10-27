@@ -30,6 +30,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
+#include <map>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -222,8 +223,9 @@ const char* kSupportedKeysHelp =
     "max-output-tokens, max-tool-iterations, system-prompt, system-prompt-file, "
     "system-prompt-append, system-prompt-append-file, trace-file, print-cot, "
     "connection-timeout, read-timeout, plugins (image:ro, jira:rw), "
-    "and per provider <name>-provider-type, <name>-provider-url, <name>-model, "
-    "<name>-api-key, <name>-reasoning-effort";
+    "per provider <name>-provider-type, <name>-provider-url, <name>-model, "
+    "<name>-api-key, <name>-reasoning-effort, "
+    "and the keys of an installed plugin, <plugin>-... (jira-url, jira-api-token, ...)";
 
 // True for the unscoped api-key and for any provider block's own key, so both
 // are masked when listed and both warn about plaintext storage when written.
@@ -236,10 +238,17 @@ int cmd_set(const Args& a) {
         ui::print_error("'set' requires <key> <value>");
         return 2;
     }
+    // A key tapto-code does not know may be an installed plugin's.
+    std::optional<PluginConfigKey> plugin_key;
     if (!is_supported_config_key(a.positional[1])) {
-        ui::print_error("unknown config key '" + a.positional[1] +
-                        "'.\n  supported keys: " + kSupportedKeysHelp);
-        return 2;
+        std::string why;
+        plugin_key = plugin_config_key(a.positional[1], why);
+        if (!plugin_key) {
+            ui::print_error("unknown config key '" + a.positional[1] + "'" +
+                            (why.empty() ? std::string() : " (" + why + ")") +
+                            ".\n  supported keys: " + kSupportedKeysHelp);
+            return 2;
+        }
     }
     Level level = a.level.value_or(Level::Local);
     if (level == Level::Policy) {
@@ -269,6 +278,9 @@ int cmd_set(const Args& a) {
         ui::print_warning(a.positional[1] + " stored in plaintext at " + path.string() +
                           "; set the provider's API key env var (e.g. ANTHROPIC_API_KEY), "
                           "or use env: / cmd: / wincred: to keep it out of the file");
+    } else if (plugin_key && plugin_key->secret && !is_secret_reference(a.positional[2])) {
+        ui::print_warning(a.positional[1] + " stored in plaintext at " + path.string() +
+                          "; use env: / cmd: / wincred: to keep it out of the file");
     }
     return 0;
 }
@@ -343,8 +355,28 @@ std::string mask_secret(const std::string& v) {
 // A reference (env:/cmd:/wincred:) says where the key lives rather than being
 // it, so it is shown in full — masking it would hide the one part of the entry
 // worth reading.
+//
+// A plugin's key is masked when the plugin declares it secret. One no
+// installed plugin vouches for (its plugin removed, or a sibling program's
+// key) is masked when its name looks like a secret's.
+bool is_secret_key(const std::string& key) {
+    if (is_api_key_key(key)) return true;
+    if (is_supported_config_key(key)) return false;
+    static std::map<std::string, bool> known; // a module is loaded once per key
+    if (auto it = known.find(key); it != known.end()) return it->second;
+    std::string why;
+    bool secret = false;
+    if (auto pk = plugin_config_key(key, why)) {
+        secret = pk->secret;
+    } else {
+        for (const char* s : {"-token", "-password", "-secret", "-key"})
+            secret = secret || has_suffix(key, s);
+    }
+    return known[key] = secret;
+}
+
 std::string list_value(const std::string& key, const std::string& value) {
-    return (is_api_key_key(key) && !is_secret_reference(value)) ? mask_secret(value) : value;
+    return (is_secret_key(key) && !is_secret_reference(value)) ? mask_secret(value) : value;
 }
 
 int cmd_list(const Args& a) {

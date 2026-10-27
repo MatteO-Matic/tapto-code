@@ -307,6 +307,21 @@ image:ro, jira:rw` in the config loads them at every start, and the plugins of
 a session come back with `/resume`. A Release build on Windows loads only a
 plugin signed with the certificate that signed tapto-code itself.
 
+A plugin's settings are config keys named after it, which `config set`
+accepts while the plugin is installed. The `jira` plugin needs two:
+
+```
+tapto-code --global config set jira-url https://jira.example.com/jira
+tapto-code --global config set jira-api-token wincred:jira   # or env:JIRA_API_TOKEN
+```
+
+and takes `jira-email` (Atlassian Cloud, which authenticates with email and
+token), `jira-project` (the project the model assumes when you name none) and
+`jira-api-version` (`2` for Jira Data Center, default `3`). Settings are read
+when the plugin is loaded, so after changing them `/remove-plugin jira` and
+`/add-plugin jira` again. Loaded read-only it searches and reads issues;
+`rw` adds creating, updating, commenting on and transitioning them.
+
 **First run:** if no provider/api-key is configured, tapto-code prompts for them
 interactively and saves them to the global (`~/.tapto`) config, then starts
 the chat. You can also set them manually instead:

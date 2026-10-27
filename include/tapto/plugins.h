@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -32,7 +33,8 @@ namespace tapto {
 //    resolved and checked by the host (resolve_plugin_path) before the call,
 //    and the mark is stripped from the schema the model sees.
 //  - Output: every result goes through overflow(), like the core tools'.
-//  - Secrets: a config key the plugin declares secret is resolved here
+//  - Config: the plugin's keys are named "<plugin>-...", so it cannot read a
+//    core key or another plugin's. A key it declares secret is resolved here
 //    (wincred:, env:, cmd:) and handed over as its value in Configure.
 //  - Policy: allowed-plugins (only these names) and allow-user-plugins = 0
 //    (only the plugins the policy's own `plugins` key names).
@@ -62,6 +64,20 @@ std::vector<std::pair<std::string, bool>> parse_plugin_list(const std::string& v
 // is true when the policy's own `plugins` key asks for it.
 std::string plugin_policy_refusal(const std::string& name, bool by_policy,
                                   const std::vector<Config::Entry>& policy);
+
+// A config key an installed plugin declares, which `config set` accepts.
+// A plugin's keys are named "<plugin>-...", the tool-name rule, so the key
+// names the module: it is loaded (signature checked, as for /add-plugin),
+// described, and freed again, without being configured. nullopt when no
+// installed, allowed plugin declares `key`; `why` then says what was found,
+// or stays empty when no module's name matched at all.
+struct PluginConfigKey {
+    std::string plugin;
+    bool secret = false;
+};
+std::optional<PluginConfigKey> plugin_config_key(const std::string& key, std::string& why,
+                                                 const std::filesystem::path& dir =
+                                                     plugin_directory());
 
 class Plugins {
 public:

@@ -6,19 +6,27 @@
 // what a call gets (paths resolved and checked by the host first), what comes
 // back through the host (an image, a file in @tmp, a long result cut), the
 // prompt, the tool-name rule, policy, and unloading. Then the image plugin
-// (plugins/image), the way the model uses it.
+// (plugins/image), the way the model uses it, and the jira plugin
+// (plugins/jira) against a fake Jira on localhost.
 //
 //   test-plugins <probe module> <probe module with a misnamed tool> <image module>
+//                <jira module>
 
 #include "tapto/plugins.h"
 
+#include "tapto/config.h"
 #include "tapto/context.h"
 #include "tapto/fstools.h"
 #include "tapto/overflow.h"
+#include "tapto/paths.h"
 #include "tapto/tool_image.h"
 #include "tapto/tools.h"
 
+#include <httplib.h>
 #include <nlohmann/json.hpp>
+
+#include <mutex>
+#include <thread>
 
 // stb builds the test images and decodes what the image plugin attached.
 #ifdef _MSC_VER
@@ -144,13 +152,15 @@ bool write_png(const fs::path& path, int w, int h, F color) {
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 4) {
-        std::cout << "usage: test-plugins <probe module> <misnamed probe module> <image module>\n";
+    if (argc != 5) {
+        std::cout << "usage: test-plugins <probe module> <misnamed probe module> <image module> "
+                     "<jira module>\n";
         return 2;
     }
     const fs::path probe = argv[1];
     const fs::path misnamed = argv[2];
     const fs::path image_module = argv[3];
+    const fs::path jira_module = argv[4];
 
     const fs::path fake_home = fs::temp_directory_path() / "tapto-plugins-tests-home";
     const std::string saved_home = get_env(kHomeVar);
@@ -389,6 +399,171 @@ int main(int argc, char** argv) {
 
         for (const char* f : {"probe-2x1.png", "probe-big.png", "probe-huge.png", "probe-blob.bin"})
             fs::remove(cwd / f, ec);
+    }
+
+    // --- the jira plugin -----------------------------------------------------------------
+    // Against a fake Jira on localhost, under a context path as Data Center
+    // installs have, with what it was sent kept for the checks.
+    {
+        httplib::Server server;
+        std::mutex seen_mutex;
+        std::vector<std::string> seen; // "METHOD path auth body"
+        auto record = [&](const httplib::Request& req) {
+            std::lock_guard<std::mutex> lock(seen_mutex);
+            seen.push_back(req.method + " " + req.path + " " +
+                           req.get_header_value("Authorization") + " " + req.body);
+        };
+        server.Get(R"(/ctx/rest/api/2/issue/([A-Z0-9-]+))",
+                   [&](const httplib::Request& req, httplib::Response& res) {
+                       record(req);
+                       if (req.matches[1] == "TPJ-1") {
+                           res.set_content(R"({"key":"TPJ-1","self":"x","fields":{"summary":"S"}})",
+                                           "application/json");
+                       } else {
+                           res.status = 404;
+                           res.set_content(R"({"errorMessages":["Issue does not exist"]})",
+                                           "application/json");
+                       }
+                   });
+        server.Post("/ctx/rest/api/2/search", [&](const httplib::Request& req, httplib::Response& res) {
+            record(req);
+            res.set_content(R"({"total":7,"issues":[{"key":"TPJ-1","self":"http://long/link",)"
+                            R"("fields":{"summary":"S"}}]})",
+                            "application/json");
+        });
+        server.Post("/ctx/rest/api/2/issue", [&](const httplib::Request& req, httplib::Response& res) {
+            record(req);
+            res.status = 201;
+            res.set_content(R"({"id":"10002","key":"TPJ-2"})", "application/json");
+        });
+        server.Post(R"(/ctx/rest/api/2/issue/TPJ-1/transitions)",
+                    [&](const httplib::Request& req, httplib::Response& res) {
+                        record(req);
+                        res.status = 204;
+                    });
+        const int port = server.bind_to_any_port("127.0.0.1");
+        std::thread serving([&] { server.listen_after_bind(); });
+        server.wait_until_ready();
+        auto last_seen = [&] {
+            std::lock_guard<std::mutex> lock(seen_mutex);
+            return seen.empty() ? std::string() : seen.back();
+        };
+        auto seen_count = [&] {
+            std::lock_guard<std::mutex> lock(seen_mutex);
+            return seen.size();
+        };
+
+        // Not configured: loaded, and every tool says how to configure it.
+        {
+            tapto::Plugins plugins;
+            CHECK_EQ(plugins.add_file(jira_module, /*writable=*/false), "");
+            const auto tools = plugins.tools();
+            CHECK_EQ(names(tools), "jira_get_project jira_list_issue_types jira_list_sprints "
+                                   "jira_search_issues jira_get_issue jira_list_transitions "
+                                   "jira_show_ticket");
+            const auto loaded = plugins.loaded();
+            CHECK_TRUE(loaded.size() == 1 && loaded[0].tools == 11 && loaded[0].write_tools == 4);
+            Context ctx;
+            const std::string r = call(tools, ctx, "jira_get_issue", {{"issue_key", "TPJ-1"}});
+            CHECK_TRUE(starts_with(r, "ERROR: Jira is not configured (no jira-url is configured)"));
+            CHECK_TRUE(contains(r, "config set jira-url"));
+            CHECK_TRUE(contains(plugins.prompt(), "Jira is not configured"));
+            CHECK_TRUE(contains(plugins.prompt(), "not instructions"));
+        }
+
+        // Configured, the token a reference the host resolves.
+        set_env("TAPTO_TEST_JIRA_TOKEN", "tok-123");
+        {
+            tapto::Config cfg = tapto::Config::load(tapto::config_path(tapto::Level::Global));
+            cfg.set("jira-url", "http://127.0.0.1:" + std::to_string(port) + "/ctx/");
+            cfg.set("jira-api-token", "env:TAPTO_TEST_JIRA_TOKEN");
+            cfg.set("jira-api-version", "2");
+            cfg.set("jira-project", "TPJ");
+            fs::create_directories(tapto::config_path(tapto::Level::Global).parent_path(), ec);
+            cfg.save(tapto::config_path(tapto::Level::Global));
+        }
+        {
+            tapto::Plugins plugins;
+            CHECK_EQ(plugins.add_file(jira_module, /*writable=*/true), "");
+            const auto tools = plugins.tools();
+            CHECK_TRUE(tools.size() == 11);
+            CHECK_TRUE(contains(plugins.prompt(), "default project is TPJ"));
+            Context ctx;
+
+            std::string r = call(tools, ctx, "jira_get_issue", {{"issue_key", "TPJ-1"}});
+            CHECK_EQ(json::parse(r, nullptr, false).value("key", ""), "TPJ-1");
+            // The context path kept, the token as a Bearer.
+            CHECK_TRUE(starts_with(last_seen(), "GET /ctx/rest/api/2/issue/TPJ-1 Bearer tok-123 "));
+
+            // Jira's own message, and no retry for a 404.
+            const std::size_t before = seen_count();
+            r = call(tools, ctx, "jira_get_issue", {{"issue_key", "TPJ-9"}});
+            CHECK_TRUE(starts_with(r, "ERROR: jira request failed: GET /rest/api/2/issue/TPJ-9"));
+            CHECK_TRUE(contains(r, "HTTP 404: Issue does not exist"));
+            CHECK_TRUE(seen_count() == before + 1);
+
+            // Search: key and fields per issue, the links dropped, the fields
+            // sent as a list.
+            r = call(tools, ctx, "jira_search_issues", {{"jql", "project = TPJ"}, {"fields", "summary, status"}});
+            const json found = json::parse(r, nullptr, false);
+            CHECK_TRUE(found.value("total", 0) == 7 && found.value("returned", 0) == 1);
+            CHECK_TRUE(!contains(r, "long/link"));
+            CHECK_TRUE(contains(last_seen(), R"("fields":["summary","status"])"));
+
+            // A new issue's fields go under "fields".
+            r = call(tools, ctx, "jira_create_issue",
+                     {{"project", "TPJ"}, {"summary", "New"}, {"issue_type", "Bug"}});
+            CHECK_TRUE(contains(r, "TPJ-2"));
+            {
+                const std::string s = last_seen();
+                const json body = json::parse(s.substr(s.find('{')), nullptr, false);
+                CHECK_EQ(body["fields"]["project"].value("key", ""), "TPJ");
+                CHECK_EQ(body["fields"].value("summary", ""), "New");
+                CHECK_EQ(body["fields"]["issuetype"].value("name", ""), "Bug");
+            }
+
+            // A transition's fields beside "transition", not in it.
+            r = call(tools, ctx, "jira_transition_issue",
+                     {{"issue_key", "TPJ-1"}, {"transition_id", 31},
+                      {"fields", {{"resolution", {{"name", "Done"}}}}}});
+            CHECK_TRUE(!starts_with(r, "ERROR"));
+            {
+                const std::string s = last_seen();
+                const json body = json::parse(s.substr(s.find('{')), nullptr, false);
+                CHECK_EQ(body["transition"].value("id", ""), "31");
+                CHECK_TRUE(!body["transition"].contains("fields"));
+                CHECK_EQ(body["fields"]["resolution"].value("name", ""), "Done");
+            }
+
+            // Arguments it refuses before any request.
+            CHECK_TRUE(starts_with(call(tools, ctx, "jira_transition_issue",
+                                        {{"issue_key", "TPJ-1"}, {"transition_id", 0}}), "ERROR"));
+            CHECK_TRUE(starts_with(call(tools, ctx, "jira_get_issue", json::object()),
+                                   "ERROR: required argument 'issue_key'"));
+            // Opening a browser needs an https jira-url and a real issue key.
+            r = call(tools, ctx, "jira_show_ticket", {{"issue_key", "TPJ-1"}});
+            CHECK_TRUE(contains(r, "must be an https URL"));
+            r = call(tools, ctx, "jira_show_ticket", {{"issue_key", "x/../evil"}});
+            CHECK_TRUE(contains(r, "invalid issue key"));
+        }
+        server.stop();
+        serving.join();
+        fs::remove(tapto::config_path(tapto::Level::Global), ec);
+
+        // config set: a key the installed module declares, found from its name.
+        const fs::path dir = jira_module.parent_path();
+        std::string why;
+        auto key = tapto::plugin_config_key("jira-url", why, dir);
+        CHECK_TRUE(key && key->plugin == "jira" && !key->secret);
+        key = tapto::plugin_config_key("jira-api-token", why, dir);
+        CHECK_TRUE(key && key->secret);
+        why.clear();
+        CHECK_TRUE(!tapto::plugin_config_key("jira-colour", why, dir));
+        CHECK_TRUE(contains(why, "has no key 'jira-colour'") && contains(why, "jira-url"));
+        why.clear();
+        CHECK_TRUE(!tapto::plugin_config_key("nosuch-url", why, dir));
+        CHECK_EQ(why, "");
+        CHECK_TRUE(!tapto::plugin_config_key("model", why, dir));
     }
 
     tapto::set_granted_folders(nullptr);

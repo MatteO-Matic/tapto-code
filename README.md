@@ -231,15 +231,18 @@ provider's own format, so it resumes only with a provider of the same type
 (claude, openai or gemini). The file holds whatever the model read, as the
 trace file does.
 
-**The model's memory.** The model keeps notes about the project in a folder of
-its own, `~/.tapto/projects/<folder>/memory/`, which it knows as `@memory`:
-decisions you made, conventions, where things live, where the work stands.
-`memory.md` is the index, and its first 50 lines are shown to the model at the
-start of every session in that folder, as its own notes and not as
-instructions; it reads the rest, and any other note it keeps there, when the
-index says it is worth it. Only its file editor writes there, never a command,
-and nothing outside the folder is reachable through it. Open the folder to see
-or correct what it remembered.
+**The model's memory.** With the memory plugin (`plugins = memory:rw` in the
+config, or `/add-plugin memory rw`), the model keeps notes about the project in
+a folder of its own, `~/.tapto/projects/<folder>/plugins/memory/`, which it
+knows as `@memory`: decisions you made, conventions, where things live, where
+the work stands. `memory.md` is the index, and its first 50 lines are shown to
+the model at the start of every session in that folder, as its own notes and
+not as instructions; it reads the rest, and any other note it keeps there, when
+the index says it is worth it. Only its file editor writes there, never a
+command, and nothing outside the folder is reachable through it; loaded `ro`,
+the model reads its notes but does not change them. Open the folder to see or
+correct what it remembered. Notes from before 1.3.0, in
+`~/.tapto/projects/<folder>/memory/`, move there the first time.
 
 **Long command output.** When a command prints more than about 16 KB, the model
 gets its first and last lines and a note saying which lines were left out and
@@ -305,7 +308,11 @@ tool takes goes through the same rules as the editor's before the plugin sees
 it, so a plugin reaches only what the model could reach anyway. `plugins =
 image:ro, jira:rw` in the config loads them at every start, and the plugins of
 a session come back with `/resume`. A Release build on Windows loads only a
-plugin signed with the certificate that signed tapto-code itself.
+plugin signed with the certificate that signed tapto-code itself. A plugin may
+keep a folder of its own per project, `~/.tapto/projects/<folder>/plugins/<plugin>/`,
+which the model knows as `@<plugin>` and reaches with its file editor, read-only
+unless the plugin is loaded `rw`; `/remove-plugin` takes it away again and
+leaves its files where they are.
 
 A plugin's settings are config keys named after it, which `config set`
 accepts while the plugin is installed. The `jira` plugin needs two:

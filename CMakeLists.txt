@@ -39,7 +39,7 @@ endif()
 # on MSVC, so a warning it trips here is fixed in the library and released.
 set(LIBTAPTO_BUILD_TESTS ON CACHE BOOL "" FORCE)
 include(FetchContent)
-set(LIBTAPTO_PIN "v0.4.0")
+set(LIBTAPTO_PIN "v0.5.0")
 if(NOT DEFINED CACHE{LIBTAPTO_TAG})
   set(LIBTAPTO_TAG "${LIBTAPTO_PIN}" CACHE STRING "libtapto version to build against")
 elseif(NOT LIBTAPTO_TAG STREQUAL LIBTAPTO_PIN)
@@ -134,7 +134,6 @@ endfunction()
 add_executable(tapto-code
   src/main.cpp
   src/commands.cpp
-  src/memory.cpp
   src/overflow.cpp
   src/plugins.cpp
   src/prompt.cpp
@@ -211,6 +210,12 @@ if(WIN32)
   target_link_libraries(tapto-plugin-jira PRIVATE crypt32 shell32 ole32 ws2_32)
 endif()
 
+# memory: the project memory, the plugin's folder @memory and the prompt that
+# carries its index. No tools and no dependencies: the core's editor does the
+# reading and writing.
+tapto_code_plugin(tapto-plugin-memory memory plugins/memory/memory.cpp)
+target_link_libraries(tapto-plugin-memory PRIVATE nlohmann_json::nlohmann_json)
+
 # --- Tests ------------------------------------------------------------------
 # Plain executables with assertions of their own, so `ctest` needs no test
 # framework fetched or installed. Run with: ctest --test-dir build --output-on-failure
@@ -227,7 +232,6 @@ add_executable(test-edits
   tests/test_edits.cpp
   src/tools.cpp
   src/commands.cpp
-  src/memory.cpp
   src/overflow.cpp
   "${libtapto_SOURCE_DIR}/test/ui_null.cpp"
 )
@@ -274,23 +278,32 @@ tapto_code_warnings(test-session)
 
 add_test(NAME session COMMAND test-session)
 
-# The project's memory file: where it lives (beside the local config, under the
-# same encoded working directory), who may reach it (the editor tool alone, by
-# a spelling that resolves to it -- no other tool, no command cwd or %p), and
-# what the system prompt carries of it (the first 50 lines, the index).
+# The memory plugin and the plugin folder it lives in: where it is (beside the
+# local config, under the same encoded working directory), who may reach it
+# (the editor tool alone, by a spelling that resolves to it -- no other tool,
+# no command cwd or %p -- and only while it is loaded rw), and what the system
+# prompt carries of it (the first 50 lines, the index). Loads the module built
+# moments ago, so the loader is compiled without the signature check.
 add_executable(test-memory
   tests/test_memory.cpp
+  src/plugins.cpp
   src/tools.cpp
   src/commands.cpp
-  src/memory.cpp
   src/overflow.cpp
   "${libtapto_SOURCE_DIR}/test/ui_null.cpp"
 )
 target_include_directories(test-memory PRIVATE include)
+target_compile_definitions(test-memory PRIVATE TAPTO_PLUGINS_ALLOW_UNSIGNED)
 target_link_libraries(test-memory PRIVATE tapto::tapto)
+if(WIN32)
+  target_link_libraries(test-memory PRIVATE wintrust)
+else()
+  target_link_libraries(test-memory PRIVATE ${CMAKE_DL_LIBS})
+endif()
+add_dependencies(test-memory tapto-plugin-memory)
 tapto_code_warnings(test-memory)
 
-add_test(NAME memory COMMAND test-memory)
+add_test(NAME memory COMMAND test-memory $<TARGET_FILE:tapto-plugin-memory>)
 
 # Tool output too long for the conversation: the head and tail inline, the
 # whole of it in the session's @tmp folder, which the model can read and
@@ -299,7 +312,6 @@ add_executable(test-overflow
   tests/test_overflow.cpp
   src/tools.cpp
   src/commands.cpp
-  src/memory.cpp
   src/overflow.cpp
   "${libtapto_SOURCE_DIR}/test/ui_null.cpp"
 )
@@ -328,7 +340,6 @@ add_executable(test-plugins
   src/plugins.cpp
   src/tools.cpp
   src/commands.cpp
-  src/memory.cpp
   src/overflow.cpp
   "${libtapto_SOURCE_DIR}/test/ui_null.cpp"
 )

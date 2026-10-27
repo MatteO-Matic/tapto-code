@@ -159,8 +159,8 @@ Open:
       Released 20 Oct (local tag `v1.2.0`). Push libtapto `main` and `v0.3.0`
       **before** tapto-code `main` and `v1.2.0`, then the pin in
       tapto-code-install.
-- [ ] Longer term the memory becomes a plugin, so an administrator can turn
-      it off (see 1.3.0).
+- [x] Longer term the memory becomes a plugin, so an administrator can turn
+      it off (see 1.3.0). Done 27 Oct: the memory plugin.
 
 ---
 
@@ -363,12 +363,13 @@ the system labels in the Backlog (`@memory`, `@tmp`).
   `"write"`. The host resolves the label or path with the same rules as the
   editor and refuses before `CallTool`, so the plugin only ever sees an
   absolute path that has been checked. The same idea as `writes` on tools.
-- **A plugin's own folders:** `Describe` lists them
-  (`folders: [{name, mode}]`). The host makes
-  `~/.tapto/projects/<p>/plugins/<plugin>/<name>/` and gives each a system
-  label, `@<plugin>` or `@<plugin>-<name>` (the tool-name rule, for labels).
-  A plugin loaded ro gets its folders ro; `/remove-plugin` takes the labels
-  away.
+- **A plugin's own folder:** one at most, `"folder": "ro" | "rw"` in
+  `Describe`. The host makes `~/.tapto/projects/<p>/plugins/<plugin>/` and
+  gives it the system label `@<plugin>`: `@` followed by a plugin's name
+  always means that plugin's folder, so no plugin may be called `tmp`
+  (decided 27 Oct, in place of named folders and `@<plugin>-<name>`). A
+  plugin loaded ro gets its folder ro; `/remove-plugin` takes the label
+  away. Configure tells the plugin its path, label and mode.
 - **Overflow** is the core's: the host gets every tool's `result_out`, so a
   long plugin result is cut and written to `@tmp` like any other. No plugin
   does it.
@@ -512,15 +513,21 @@ the tool-name rule and the prompt alone; Jira then adds config, secrets, rw.
         Describe says. An unsigned Release build refuses the key and says
         why. `config list` masks a non-core key no installed plugin claims
         when its name ends in -token/-password/-secret/-key.
-      - Plugin folders (`folders` in Describe, `@<plugin>` labels): logged
-        and ignored for now. Needed by the memory plugin.
+      - [x] Plugin folders: `"folder": "ro" | "rw"` in Describe, one per
+        plugin, at `projects/<p>/plugins/<plugin>/` as `@<plugin>`; the name
+        `tmp` is refused. Written ro unless both say rw; the mode follows
+        `/add-plugin` and the plugin is configured again with it;
+        `/remove-plugin` takes the label away (libtapto
+        `FolderSet::remove_system` / `set_system_writable`, for `v0.5.0`).
+        Configure gets `"folder": {path, label, writable}`.
       - The signed path is untested: needs a build signed with the eToken.
       - [x] Linux: an exe in a `bin/` loads from `../lib/tapto-code/plugins`
         (`plugin_directory_for`), and the install rule puts them there, so the
         packages carry `/usr/lib/tapto-code/plugins/image.so`; any other exe
         location (the build tree) keeps `<exe dir>/plugins`.
-      - plugin.h should say that strings are UTF-8, paths included (the
+      - [x] plugin.h says that strings are UTF-8, paths included (the
         host passes `u8string()`), and that no exception may leave a call.
+        In libtapto for `v0.5.0`.
 - [x] `image` plugin: `read_image` moved out of `tools.cpp` into
       `plugins/image/image.cpp` as `image_read`, stb with it; the core no
       longer links stb and the editor's binary-file message no longer names
@@ -550,10 +557,18 @@ the tool-name rule and the prompt alone; Jira then adds config, secrets, rw.
 - [ ] Installer: `plugins\` in the MSI, the plugin signed in
       the same job; plugins as their own feature or their own MSI, to decide.
 - [ ] Open: tapto-jira as a thin host around the same plugin, or retired.
-- [ ] The project memory (PR #1, today in the core) as a plugin, so an
-      administrator can leave it out with `allowed-plugins`: `@memory` as the
-      plugin's declared folder and its index from `ITaptoPluginPrompt` (see
-      Paths, folders and overflow). Comes after the system labels.
+- [x] The project memory (PR #1) as a plugin, so an administrator can leave
+      it out with `allowed-plugins`: `plugins/memory/memory.cpp`, no tools, its
+      folder `@memory` and its rules and index from `ITaptoPluginPrompt`;
+      `src/memory.cpp` and `tapto/memory.h` are gone from the core. Decided
+      27 Oct: not loaded by default, like any plugin (`plugins = memory:rw`),
+      and no `:off`. Loaded ro the prompt says the memory is read-only. On its
+      first configure with an empty folder it moves the 1.2.0 memory
+      (`projects/<p>/memory/`) in. test-memory loads the module.
+      - Breaking for 1.2.0 users: the memory is off until they add the
+        plugin. In CHANGELOG under Changed.
+      - `plugins = memory` alone is ro, as for every plugin: the model reads
+        its notes and cannot write them.
 
 ---
 

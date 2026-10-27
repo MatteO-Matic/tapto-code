@@ -73,6 +73,14 @@ breaking changes and the patch number everything else.)
 - `config set` accepts the settings of an installed plugin, such as
   `jira-url`, and `config list` masks the ones the plugin marks secret.
 
+### Changed
+
+- The model's notes per project are now the memory plugin, and are off until
+  you turn them on: `plugins = memory:rw` in the config, or `/add-plugin memory
+  rw` in a session (`ro` lets the model read its notes but not change them).
+  The notes move to `~/.tapto/projects/<project>/plugins/memory/` the first
+  time, and administrators can leave the memory out with `allowed-plugins`.
+
 ### Fixed
 
 - A table the model returned that was wider than your terminal had its rows

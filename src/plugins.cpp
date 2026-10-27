@@ -3,8 +3,10 @@
 
 #include "tapto/plugins.h"
 
+#include "tapto/fstools.h"
 #include "tapto/log.h"
 #include "tapto/overflow.h"
+#include "tapto/paths.h"
 #include "tapto/plugin.h"
 #include "tapto/policy.h"
 #include "tapto/provider.h"
@@ -444,6 +446,12 @@ struct Plugins::Loaded {
     std::vector<std::string> config_keys;
     std::set<std::string> secret_keys;
     std::vector<Tool> tools;
+    std::string folder_mode;   // "ro" or "rw" when it declares a folder
+    std::string folder_label;  // "@<name>" once the folder is in the set
+    fs::path folder_root;      // the folder as the set holds it
+
+    // Its folder is writable when it says rw and the plugin is loaded rw.
+    bool folder_writable() const { return writable && folder_mode == "rw"; }
 
     Module module;
     CanUnloadNowFn can_unload = nullptr;
@@ -514,6 +522,8 @@ std::string read_description(const std::string& text, Plugins::Loaded& l, bool c
         return "its name '" + name + "' is not one (lowercase letters, digits and '-')";
     if (check_name && name != l.name)
         return "it calls itself '" + name + "', but its file is " + l.file.filename().u8string();
+    // @tmp is the core's: a plugin of that name would have its label.
+    if (name == "tmp") return "its name 'tmp' is reserved (@tmp is tapto-code's own folder)";
     l.name = name;
     l.version = d.value("version", std::string());
     if (d.contains("prompt") && d["prompt"].is_string()) l.fixed_prompt = d["prompt"];
@@ -534,9 +544,10 @@ std::string read_description(const std::string& text, Plugins::Loaded& l, bool c
             if (k.is_object() && k.value("secret", false)) l.secret_keys.insert(key);
         }
     }
-    if (d.contains("folders") && d["folders"].is_array() && !d["folders"].empty()) {
-        // Plugin folders (@<plugin>) are not in this tapto-code yet.
-        mclog("[plugin " + name + "] declares folders; not supported yet, ignored\n");
+    if (d.contains("folder")) {
+        const json f = d["folder"];
+        if (f != "ro" && f != "rw") return "its folder must be \"ro\" or \"rw\"";
+        l.folder_mode = f.get<std::string>();
     }
 
     if (!d.contains("tools") || !d["tools"].is_array()) return "it lists no tools";
@@ -587,12 +598,25 @@ std::string plugin_config(const Plugins::Loaded& l, std::string& error) {
             c[key] = *v;
         }
     }
+    // "folder" is no plugin's key: those are all "<plugin>-...".
+    if (!l.folder_label.empty()) {
+        c["folder"] = {{"path", l.folder_root.u8string()},
+                       {"label", l.folder_label},
+                       {"writable", l.folder_writable()}};
+    }
     return c.dump();
 }
 
 } // namespace
 
 // --- the public side ---------------------------------------------------------------
+
+fs::path plugin_folder(const std::string& name) {
+    // The local scope's directory is the project's: the same <encoded-cwd>
+    // it keeps its config and saved conversation under.
+    const fs::path dir = config_path(Level::Local).parent_path();
+    return dir.empty() ? fs::path() : dir / "plugins" / name;
+}
 
 fs::path plugin_directory_for(const fs::path& exe) {
     const fs::path dir = exe.parent_path();
@@ -689,9 +713,31 @@ Plugins::Plugins() {
 
 namespace {
 
+// Puts the plugin's folder in `folders` as @<name>, made when it is not there
+// yet. "" on success.
+std::string add_folder(Plugins::Loaded& p, FolderSet* folders) {
+    if (!folders) return "it wants a folder, and this tapto-code has none to give";
+    const fs::path dir = plugin_folder(p.name);
+    if (dir.empty())
+        return "it wants a folder, and there is no project (the working directory "
+               "could not be read)";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    if (ec) return "cannot make its folder " + dir.u8string() + ": " + ec.message();
+    const std::string label = "@" + p.name;
+    const std::string err = folders->add_system(label, dir.u8string(), p.folder_writable(),
+                                                "the " + p.name + " plugin's folder");
+    if (!err.empty()) return err.rfind("ERROR: ", 0) == 0 ? err.substr(7) : err;
+    p.folder_label = label;
+    p.folder_root = folders->get(label)->root;
+    return "";
+}
+
 // Asks the loaded module for its plugin, reads its description and, when
-// `configure`, configures it. "" when it is ready to offer its tools.
-std::string attach(Plugins::Loaded& p, bool check_name, bool configure = true) {
+// `configure`, gives it its folder and configures it. "" when it is ready to
+// offer its tools; on failure its folder is gone again.
+std::string attach(Plugins::Loaded& p, bool check_name, bool configure = true,
+                   FolderSet* folders = nullptr) {
     auto get = reinterpret_cast<GetPluginFn>(p.module.sym(kGetPluginExport));
     p.can_unload = reinterpret_cast<CanUnloadNowFn>(p.module.sym(kCanUnloadNowExport));
     if (!get || !p.can_unload)
@@ -707,10 +753,18 @@ std::string attach(Plugins::Loaded& p, bool check_name, bool configure = true) {
     if (p.plugin->Describe(desc.out()) != scom::OK) return "its Describe failed";
     if (std::string why = read_description(desc.str(), p, check_name); !why.empty()) return why;
     if (!configure) return "";
-    std::string cfg_error;
-    const std::string cfg = plugin_config(p, cfg_error);
-    if (!cfg_error.empty()) return cfg_error;
-    if (p.plugin->Configure(cfg.c_str()) != scom::OK) return "it refused its configuration";
+    if (!p.folder_mode.empty()) {
+        if (std::string why = add_folder(p, folders); !why.empty()) return why;
+    }
+    std::string why;
+    const std::string cfg = plugin_config(p, why);
+    if (why.empty() && p.plugin->Configure(cfg.c_str()) != scom::OK)
+        why = "it refused its configuration";
+    if (!why.empty()) {
+        if (!p.folder_label.empty()) folders->remove_system(p.folder_label);
+        p.folder_label.clear();
+        return why;
+    }
     p.prompt = scom::QIPtr<ITaptoPluginPrompt>(p.plugin.get());
     return "";
 }
@@ -788,6 +842,14 @@ std::string Plugins::add(const std::string& name, bool writable, bool by_policy)
         if (std::string why = plugin_policy_refusal(name, by_policy, policy); !why.empty())
             return why;
         l->writable = writable;
+        // Its folder follows the mode, and the plugin is told, so what it
+        // says of the folder stays true.
+        if (!l->folder_label.empty() && m_folders) {
+            m_folders->set_system_writable(l->folder_label, l->folder_writable());
+            std::string cfg_error;
+            const std::string cfg = plugin_config(*l, cfg_error);
+            if (cfg_error.empty()) (void)l->plugin->Configure(cfg.c_str());
+        }
         return "";
     }
     if (std::string why = plugin_policy_refusal(name, by_policy, policy); !why.empty())
@@ -806,7 +868,8 @@ std::string Plugins::add(const std::string& name, bool writable, bool by_policy)
     l->writable = writable;
     std::string error;
     if (!load_module(file, l->module, error)) return error;
-    if (std::string why = attach(*l, /*check_name=*/true); !why.empty()) {
+    if (std::string why = attach(*l, /*check_name=*/true, /*configure=*/true, m_folders);
+        !why.empty()) {
         finish(l);
         return "plugin '" + name + "': " + why;
     }
@@ -822,7 +885,8 @@ std::string Plugins::add_file(const fs::path& file, bool writable) {
     l->writable = writable;
     std::string error;
     if (!load_module(file, l->module, error)) return error;
-    if (std::string why = attach(*l, /*check_name=*/false); !why.empty()) {
+    if (std::string why = attach(*l, /*check_name=*/false, /*configure=*/true, m_folders);
+        !why.empty()) {
         finish(l);
         return file.filename().u8string() + ": " + why;
     }
@@ -842,6 +906,7 @@ bool Plugins::remove(const std::string& name, bool* unloaded) {
     if (it == m_loaded.end()) return false;
     std::unique_ptr<Loaded> l = std::move(*it);
     m_loaded.erase(it);
+    if (!l->folder_label.empty() && m_folders) m_folders->remove_system(l->folder_label);
     const bool freed = l->unload();
     if (unloaded) *unloaded = freed;
     // Not freed: it stays loaded with its tools gone, and its host with it.
@@ -896,6 +961,7 @@ std::vector<Plugins::Entry> Plugins::loaded() const {
         e.write_tools = static_cast<std::size_t>(std::count_if(
             l->tools.begin(), l->tools.end(), [](const auto& t) { return t.writes; }));
         e.file = l->file;
+        e.folder = l->folder_label;
         out.push_back(std::move(e));
     }
     return out;

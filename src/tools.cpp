@@ -5,7 +5,6 @@
 #include "tapto/commands.h"
 
 #include "tapto/context.h"
-#include "tapto/memory.h"
 #include "tapto/overflow.h"
 #include "tapto/policy.h"
 
@@ -217,10 +216,11 @@ bool in_read_only_program_folder(const fs::path& resolved) {
 //               project's own build there is the same trust.
 //   WorkingDir  the working directory alone.
 //
-// tapto-code's own folders (@tmp, @memory) are in the folder set too, under
-// '@' labels, so Read and Write reach them by their mode like any grant. They
-// are in ~/.tapto, so refuse_protected_write still refuses every write there;
-// resolve_for_editor lets the editor alone write in a writable one (@memory).
+// tapto-code's own folders (@tmp, and a plugin's folder such as @memory) are
+// in the folder set too, under '@' labels, so Read and Write reach them by
+// their mode like any grant. They are in ~/.tapto, so refuse_protected_write
+// still refuses every write there; resolve_for_editor lets the editor alone
+// write in a writable one.
 enum class Scope { Read, Write, WorkingDir };
 
 // Resolve `input` (absolute, or relative to `base`) and confirm it stays
@@ -441,10 +441,10 @@ bool in_tapto_dir(const fs::path& resolved, const std::string& input) {
 // Refuse a path that a write must not touch. Shared by the editor and by
 // run_command, so a command cannot reach what the editor is refused.
 //
-// The project's memory (@memory) sits in ~/.tapto and is refused here like the
-// rest of it: the editor's exception lives in resolve_for_editor alone, so a
-// command's cwd or %p path never reaches it, not even through a writable
-// grant that covers the home folder.
+// A plugin's folder (the memory's @memory) sits in ~/.tapto and is refused here
+// like the rest of it: the editor's exception lives in resolve_for_editor
+// alone, so a command's cwd or %p path never reaches it, not even through a
+// writable grant that covers the home folder.
 bool refuse_protected_write(const fs::path& resolved, const std::string& input, std::string& error) {
     if (in_git_dir(resolved, input)) {
         error = "ERROR: '" + input + "' is inside a repository's git directory, which "
@@ -511,7 +511,7 @@ std::string execute_text_editor(Context& /*context*/, const json& in) {
                 std::string sandbox_err;
                 // A read: the read scope (the working directory and every
                 // granted folder, whatever their mode, so .git and read-only
-                // grants stay readable), plus the memory file.
+                // grants stay readable), and tapto-code's own folders.
                 if (!resolve_for_read(in["path"].get<std::string>(), path, sandbox_err)) {
                     return sandbox_err;
                 }
@@ -2085,9 +2085,9 @@ std::vector<ToolSpec> builtin_tools() {
         "file_text is the content field for create and write only; str_replace and "
         "insert take their text in new_str.\n"
         "Beyond the working directory, this tool reaches the folders the user "
-        "granted and tapto-code's own folders, named with an '@' label: @memory "
-        "(your notes, read and write) and @tmp (long tool output, read-only). "
-        "Address a file in one as <label>/<path>, e.g. @memory/memory.md.";
+        "granted and tapto-code's own folders, named with an '@' label: @tmp (long "
+        "tool output, read-only) and a plugin's folder, @<plugin>, when it has one. "
+        "Address a file in one as <label>/<path>, e.g. @tmp/<file>.";
     editor.claude_builtin_type = "text_editor_20250728";
     editor.parameters = {
         {"type", "object"},

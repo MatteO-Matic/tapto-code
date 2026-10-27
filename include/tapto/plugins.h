@@ -15,6 +15,8 @@
 
 namespace tapto {
 
+class FolderSet;
+
 // ---------------------------------------------------------------------------
 // Plugins: tools from modules beside tapto-code, spoken to through the
 // interfaces in libtapto's tapto/plugin.h.
@@ -36,6 +38,11 @@ namespace tapto {
 //  - Config: the plugin's keys are named "<plugin>-...", so it cannot read a
 //    core key or another plugin's. A key it declares secret is resolved here
 //    (wincred:, env:, cmd:) and handed over as its value in Configure.
+//  - Folder: a plugin may declare one folder of its own, per project, at
+//    plugin_folder(): the model reaches it as "@<plugin>" with the core's
+//    path rules and editor, read-only unless both the plugin and the folder
+//    are rw. It goes with /remove-plugin. "tmp" is no plugin's name, since
+//    @tmp is the core's.
 //  - Policy: allowed-plugins (only these names) and allow-user-plugins = 0
 //    (only the plugins the policy's own `plugins` key names).
 // ---------------------------------------------------------------------------
@@ -79,12 +86,21 @@ std::optional<PluginConfigKey> plugin_config_key(const std::string& key, std::st
                                                  const std::filesystem::path& dir =
                                                      plugin_directory());
 
+// The folder a plugin named `name` gets in this project, beside the project's
+// config: ~/.tapto/projects/<project>/plugins/<name>/. Empty without a
+// project (no readable working directory).
+std::filesystem::path plugin_folder(const std::string& name);
+
 class Plugins {
 public:
     Plugins();
     ~Plugins(); // shuts down and releases every plugin
     Plugins(const Plugins&) = delete;
     Plugins& operator=(const Plugins&) = delete;
+
+    // Where a plugin's folder goes as "@<plugin>": without it, a plugin that
+    // declares a folder is refused. The set must outlive this object's use.
+    void set_folders(FolderSet* folders) { m_folders = folders; }
 
     // Loads plugin `name` from plugin_directory(), or changes its mode when it
     // is loaded already. Policy is applied. "" on success, else what went wrong.
@@ -115,6 +131,7 @@ public:
         std::size_t tools = 0;       // all its tools
         std::size_t write_tools = 0; // of them, those declared "writes"
         std::filesystem::path file;
+        std::string folder; // "@<name>" when it has one
     };
     std::vector<Entry> loaded() const;
 
@@ -123,6 +140,7 @@ public:
 private:
     std::vector<std::unique_ptr<Loaded>> m_loaded;
     std::vector<std::unique_ptr<Loaded>> m_hidden; // removed, module kept until exit
+    FolderSet* m_folders = nullptr;
 };
 
 } // namespace tapto

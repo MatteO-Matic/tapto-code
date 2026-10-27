@@ -4,7 +4,6 @@
 #include "tapto/commands.h"
 #include "tapto/config.h"
 #include "tapto/fstools.h"
-#include "tapto/memory.h"
 #include "tapto/overflow.h"
 #include "tapto/paths.h"
 #include "tapto/plugins.h"
@@ -610,6 +609,7 @@ std::string list_plugins_text(const Plugins& plugins) {
             if (e.write_tools)
                 out << ", " << e.write_tools << " that change things"
                     << (e.writable ? "" : " (not offered)");
+            if (!e.folder.empty()) out << ", its folder " << e.folder;
         }
     }
     std::string rest;
@@ -1546,14 +1546,9 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
             ui::print_warning("long tool output will be cut, not kept: " + err);
         }
     }
-    // The project's memory, reached as @memory (tapto/memory.h).
-    bool has_memory = false;
-    if (const std::string err = add_memory_folder(folders); err.empty()) {
-        has_memory = true;
-    } else {
-        ui::print_warning("no project memory this session: " + err);
-    }
     set_granted_folders(&folders); // outlives the chat loop below
+    // A plugin's own folder joins the set as @<plugin> (the memory's @memory).
+    plugins.set_folders(&folders);
     // The plugins the configuration asks for, `plugins = image:ro, jira:rw`.
     // One the policy itself names loads even with allow-user-plugins = 0.
     for (const auto& e : effective_config()) {
@@ -1576,14 +1571,9 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
         if (const std::string extra = folder_prompt(folders); !extra.empty()) {
             prompt += "\n\n" + extra;
         }
-        // The project's memory: where it lives, the index rule, and the index
-        // itself. Rebuilt with the rest of the prompt, so a memory the model
+        // What the plugins say of their tools, the changing part asked anew:
+        // the memory plugin's index is read again, so a memory the model
         // writes mid-session is picked up at the next rebuild.
-        if (const std::string extra = has_memory ? memory_prompt() : std::string();
-            !extra.empty()) {
-            prompt += "\n\n" + extra;
-        }
-        // What the plugins say of their tools, the changing part asked anew.
         if (const std::string extra = plugins.prompt(); !extra.empty()) {
             prompt += "\n\n" + extra;
         }
@@ -2011,10 +2001,6 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
                 << "  " << (in_tokens == 0
                           ? std::string("— (no request yet)")
                           : std::to_string(in_tokens) + " input tokens") << "\n"
-                << "\x1b[1m"  << "  Memory"      << "\x1b[0m"
-                << "  " << (memory_path().empty()
-                          ? std::string("— (no project directory)")
-                          : memory_path().string()) << "\n"
                 << "\x1b[1m"  << "  Saved to"    << "\x1b[0m"
                 << "  " << session_file.string() << "\n"
                 << "\x1b[1m"  << "  Max tool it." << "\x1b[0m"

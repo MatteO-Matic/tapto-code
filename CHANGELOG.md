@@ -62,7 +62,7 @@ breaking changes and the patch number everything else.)
   what to pass them. The note is shown to the model alongside the command and
   is never run.
 - With a model that can see, `/add-plugin image` (or `plugin.image = ro` in
-  the config) lets it look at image files: PNG, JPEG, WebP, BMP, GIF and TGA.
+  the config) lets it look at image files: PNG, JPEG, BMP and GIF.
   Each image is normalised to PNG and its longest side capped at 1600 pixels;
   larger images are down-scaled before being shown.
 - `/add-plugin jira` lets the model read your Jira server alongside the code:

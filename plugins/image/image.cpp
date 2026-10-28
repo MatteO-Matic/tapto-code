@@ -9,7 +9,7 @@
 // /add-plugin image, or `plugin.image = ro`, where it is wanted.
 //
 // image_read decodes the file, re-encodes it as PNG (every provider takes
-// PNG; it also normalises JPEG/WebP/BMP/... into one shape) and hands the
+// PNG; it also normalises JPEG/BMP/GIF into one shape) and hands the
 // bytes to the host with ITaptoHost::AttachImage, which attaches them to the
 // model's turn in the provider's shape. The path is the host's business: it is
 // marked "x-tapto-path": "read", so the host resolves and checks it before the
@@ -23,7 +23,13 @@
 // gigabytes first.
 //
 // stb_image is a single-header decoder and stb_image_write a single-header
-// PNG encoder; their implementations are compiled into this file.
+// PNG encoder; their implementations are compiled into this file. Every
+// decoder parses untrusted bytes, and stb picks one by sniffing the content,
+// not the file's extension, so only the formats image_read names are compiled
+// in (STBI_ONLY_*): PNG, JPEG, BMP and GIF (its first frame). The rest (TGA,
+// PSD, HDR, PIC, PNM) are left out, not merely unlisted; TGA especially,
+// which has no magic number, so stb would try it on whatever the others
+// reject.
 
 #include <algorithm>
 #include <cstdint>
@@ -44,6 +50,10 @@
 #pragma warning(disable : 4244 4245 4100 4456 4457 4702) // stb's own conversions
 #endif
 #define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_PNG
+#define STBI_ONLY_JPEG
+#define STBI_ONLY_BMP
+#define STBI_ONLY_GIF
 #include "stb_image.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -77,8 +87,7 @@ std::string lower_ext(const fs::path& p) {
 
 bool has_image_ext(const fs::path& p) {
     const std::string e = lower_ext(p);
-    return e == "png" || e == "jpg" || e == "jpeg" || e == "webp" || e == "bmp" ||
-           e == "gif" || e == "tga";
+    return e == "png" || e == "jpg" || e == "jpeg" || e == "bmp" || e == "gif";
 }
 
 // Text, as far as a glance at the start tells: no NUL in the first 8 KB.
@@ -232,12 +241,12 @@ public:
             {"name", "image"},
             {"version", "1.0.0"},
             {"prompt",
-             "To look at an image file (PNG, JPEG, WebP, BMP, GIF, TGA), use image_read: "
+             "To look at an image file (PNG, JPEG, BMP, GIF), use image_read: "
              "the text tools refuse binary files."},
             {"tools", json::array({{
                 {"name", "image_read"},
                 {"description",
-                 "Read an image file (PNG, JPEG, WebP, BMP, GIF, TGA) and attach it to "
+                 "Read an image file (PNG, JPEG, BMP, GIF) and attach it to "
                  "your reply for you to see. The image is normalised to PNG, and its "
                  "longest side is capped at 1600 pixels (down-scaled when larger); images "
                  "over 16384 pixels on a side are refused. Use it when a file you want to "

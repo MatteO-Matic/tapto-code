@@ -385,6 +385,12 @@ int main(int argc, char** argv) {
         { std::ofstream(cwd / "probe-blob.bin", std::ios::binary) << std::string("MZ\0\0\0\0PE\0\0", 10); }
         r = call(tools, ctx, "image_read", {{"path", "probe-blob.bin"}});
         CHECK_TRUE(contains(r, "binary, so it is not an image"));
+        // A format stb could decode but the plugin does not compile in: a
+        // valid 1x1 PPM is refused, whatever its name.
+        { std::ofstream(cwd / "probe-1x1.png", std::ios::binary) << std::string("P6\n1 1\n255\n\0\0\0", 14); }
+        r = call(tools, ctx, "image_read", {{"path", "probe-1x1.png"}});
+        CHECK_TRUE(contains(r, "could not be decoded"));
+        CHECK_TRUE(!tapto::takeToolImage(ctx, img));
         r = call(tools, ctx, "image_read", {{"path", "probe-none.png"}});
         CHECK_EQ(r, "ERROR: Not found: probe-none.png");
         // Outside every folder: the host refuses, the plugin is never asked.
@@ -400,7 +406,8 @@ int main(int argc, char** argv) {
             CHECK_TRUE(contains(r, "is a binary file") && !contains(r, "read_image"));
         }
 
-        for (const char* f : {"probe-2x1.png", "probe-big.png", "probe-huge.png", "probe-blob.bin"})
+        for (const char* f : {"probe-2x1.png", "probe-big.png", "probe-huge.png", "probe-blob.bin",
+                              "probe-1x1.png"})
             fs::remove(cwd / f, ec);
     }
 

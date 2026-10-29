@@ -80,6 +80,21 @@ breaking changes and the patch number everything else.)
   the list and reads a skill when a task matches it, and never changes them.
   `config set skills-folder <path>` uses another folder, and an administrator
   can set it to one the organization keeps.
+- `/add-plugin mcp` gives the model the tools of MCP servers: local ones
+  tapto-code starts itself and remote ones over HTTPS, listed in
+  `~/.tapto/plugins/mcp/servers.json` in the `mcpServers` layout other tools
+  use (`config set mcp-servers <path>` names another file).
+  Tokens in that file may be `env:`, `cmd:` or `wincred:` references. Loaded
+  read-only, only the tools a server marks as read-only are offered; a
+  server's entry can say otherwise, or offer only some of its tools.
+  Edits to the file are picked up before your next message, starting and
+  stopping only the servers you changed. `/mcp list` shows the servers,
+  `/mcp reload` restarts them all, and
+  `/mcp login <server>` logs in to one that asks for it in your browser; the
+  login is kept in Windows Credential Manager and renewed by itself until
+  `/mcp logout <server>`.
+- A plugin can bring a command of its own, named after it, such as `/mcp`;
+  `/help` lists those of the plugins loaded.
 
 ### Changed
 

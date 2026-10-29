@@ -6,11 +6,13 @@
 // what a call gets (paths resolved and checked by the host first), what comes
 // back through the host (an image, a file in @tmp, a long result cut), the
 // prompt, the tool-name rule, policy, and unloading. Then the image plugin
-// (plugins/image), the way the model uses it, and the jira plugin
-// (plugins/jira) against a fake Jira on localhost.
+// (plugins/image), the way the model uses it, the jira plugin (plugins/jira)
+// against a fake Jira on localhost, the skills plugin, and the mcp plugin
+// (plugins/mcp) with a stdio server (tests/plugin/mcp_server.cpp) and an HTTP
+// one on localhost.
 //
 //   test-plugins <probe module> <probe module with a misnamed tool> <image module>
-//                <jira module>
+//                <jira module> <skills module> <mcp module> <stdio MCP server>
 
 #include "tapto/plugins.h"
 
@@ -24,8 +26,10 @@
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
+#include <openssl/sha.h>
 
 #include <mutex>
+#include <set>
 #include <thread>
 
 // stb builds the test images and decodes what the image plugin attached.
@@ -152,9 +156,9 @@ bool write_png(const fs::path& path, int w, int h, F color) {
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 6) {
+    if (argc != 8) {
         std::cout << "usage: test-plugins <probe module> <misnamed probe module> <image module> "
-                     "<jira module> <skills module>\n";
+                     "<jira module> <skills module> <mcp module> <stdio MCP server>\n";
         return 2;
     }
     const fs::path probe = argv[1];
@@ -162,6 +166,8 @@ int main(int argc, char** argv) {
     const fs::path image_module = argv[3];
     const fs::path jira_module = argv[4];
     const fs::path skills_module = argv[5];
+    const fs::path mcp_module = argv[6];
+    const fs::path mcp_server = fs::absolute(argv[7]);
 
     const fs::path fake_home = fs::temp_directory_path() / "tapto-plugins-tests-home";
     const std::string saved_home = get_env(kHomeVar);
@@ -285,8 +291,10 @@ int main(int argc, char** argv) {
         // @tmp is read-only, and a git directory is never written.
         CHECK_TRUE(starts_with(call(tools, ctx, "probe_write", {{"path", "@tmp/x.txt"}}), "ERROR"));
         CHECK_TRUE(starts_with(call(tools, ctx, "probe_write", {{"path", ".git/config"}}), "ERROR"));
-        // Its config: the keys it declared, none set here.
-        CHECK_EQ(call(tools, ctx, "probe_config", json::object()), "{}");
+        // Its config: the keys it declared, none set here, and where its
+        // user settings go.
+        CHECK_EQ(call(tools, ctx, "probe_config", json::object()),
+                 json({{"user_folder", tapto::plugin_user_folder("probe").u8string()}}).dump());
     }
 
     // --- the tool-name rule ------------------------------------------------------------
@@ -675,6 +683,546 @@ int main(int argc, char** argv) {
         CHECK_TRUE(plugins.remove("skills"));
         set_folder_key("");
     }
+
+    // --- the mcp plugin ------------------------------------------------------------
+    {
+        // An HTTP server: a session from initialize, the tool list as an
+        // event stream, the calls as plain JSON.
+        httplib::Server server;
+        std::mutex seen_mutex;
+        std::vector<std::string> seen; // "METHOD rpc-method auth session"
+        server.Post("/mcp", [&](const httplib::Request& req, httplib::Response& res) {
+            const json m = json::parse(req.body, nullptr, false);
+            const std::string method = m.value("method", std::string());
+            {
+                std::lock_guard<std::mutex> lock(seen_mutex);
+                seen.push_back("POST " + method + " " + req.get_header_value("Authorization") +
+                               " " + req.get_header_value("Mcp-Session-Id"));
+            }
+            if (!m.contains("id")) {
+                res.status = 202;
+                return;
+            }
+            json r = {{"jsonrpc", "2.0"}, {"id", m["id"]}};
+            if (method == "initialize") {
+                r["result"] = {{"protocolVersion", "2025-03-26"},
+                               {"capabilities", json::object()},
+                               {"serverInfo", {{"name", "web"}, {"version", "2"}}}};
+                res.set_header("Mcp-Session-Id", "sess-1");
+            } else if (method == "tools/list") {
+                r["result"] = {{"tools", json::array({{{"name", "lookup"},
+                                                      {"inputSchema", {{"type", "object"}}},
+                                                      {"annotations", {{"readOnlyHint", true}}}}})}};
+                res.set_content("event: message\ndata: " + r.dump() + "\n\n", "text/event-stream");
+                return;
+            } else {
+                const std::string tool = m["params"].value("name", std::string());
+                r["result"] = {{"content", json::array({{{"type", "text"}, {"text", "web " + tool}}})}};
+            }
+            res.set_content(r.dump(), "application/json");
+        });
+        server.Delete("/mcp", [&](const httplib::Request& req, httplib::Response&) {
+            std::lock_guard<std::mutex> lock(seen_mutex);
+            seen.push_back("DELETE " + req.get_header_value("Mcp-Session-Id"));
+        });
+        // An MCP server behind OAuth, and its authorization server: the
+        // metadata, a registration, an authorization that answers at once
+        // (the user who logs in), and a token endpoint that checks PKCE and
+        // renews with a refresh token.
+        std::string base; // http://127.0.0.1:<port>, once bound
+        struct OAuthFake {
+            std::set<std::string> access, refresh; // the tokens it takes now
+            std::string client_id, redirect, challenge, scope, resource, revoked;
+            int clients = 0, tokens = 0;
+        } of;
+        auto b64url = [](const unsigned char* d, std::size_t n) {
+            static const char* t = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+            std::string out;
+            for (std::size_t i = 0; i < n; i += 3) {
+                const uint32_t v = (uint32_t(d[i]) << 16) | (i + 1 < n ? uint32_t(d[i + 1]) << 8 : 0) |
+                                   (i + 2 < n ? uint32_t(d[i + 2]) : 0);
+                out += t[(v >> 18) & 63];
+                out += t[(v >> 12) & 63];
+                if (i + 1 < n) out += t[(v >> 6) & 63];
+                if (i + 2 < n) out += t[v & 63];
+            }
+            return out;
+        };
+        server.Post("/secure", [&](const httplib::Request& req, httplib::Response& res) {
+            std::string auth = req.get_header_value("Authorization");
+            {
+                std::lock_guard<std::mutex> lock(seen_mutex);
+                const std::string token = auth.rfind("Bearer ", 0) == 0 ? auth.substr(7) : "";
+                if (!of.access.count(token)) {
+                    res.status = 401;
+                    res.set_header("WWW-Authenticate",
+                                   "Bearer resource_metadata=\"" + base +
+                                       "/.well-known/oauth-protected-resource/secure\", scope=\"mcp.read\"");
+                    return;
+                }
+            }
+            const json m = json::parse(req.body, nullptr, false);
+            if (!m.contains("id")) {
+                res.status = 202;
+                return;
+            }
+            const std::string method = m.value("method", std::string());
+            json r = {{"jsonrpc", "2.0"}, {"id", m["id"]}};
+            if (method == "initialize") {
+                r["result"] = {{"protocolVersion", "2025-06-18"},
+                               {"capabilities", json::object()},
+                               {"serverInfo", {{"name", "secure"}, {"version", "1"}}}};
+            } else if (method == "tools/list") {
+                r["result"] = {{"tools", json::array({{{"name", "lookup"},
+                                                      {"inputSchema", {{"type", "object"}}},
+                                                      {"annotations", {{"readOnlyHint", true}}}}})}};
+            } else {
+                r["result"] = {{"content", json::array({{{"type", "text"},
+                                                          {"text", "secure lookup " + auth.substr(7)}}})}};
+            }
+            res.set_content(r.dump(), "application/json");
+        });
+        server.Get("/.well-known/oauth-protected-resource/secure",
+                   [&](const httplib::Request&, httplib::Response& res) {
+                       res.set_content(json{{"resource", base + "/secure"},
+                                            {"authorization_servers", {base + "/as"}},
+                                            {"scopes_supported", {"mcp.read"}}}
+                                           .dump(),
+                                       "application/json");
+                   });
+        server.Get("/.well-known/oauth-authorization-server/as",
+                   [&](const httplib::Request&, httplib::Response& res) {
+                       res.set_content(json{{"issuer", base + "/as"},
+                                            {"authorization_endpoint", base + "/as/authorize"},
+                                            {"token_endpoint", base + "/as/token"},
+                                            {"registration_endpoint", base + "/as/register"},
+                                            {"revocation_endpoint", base + "/as/revoke"},
+                                            {"code_challenge_methods_supported", {"S256"}}}
+                                           .dump(),
+                                       "application/json");
+                   });
+        server.Post("/as/register", [&](const httplib::Request& req, httplib::Response& res) {
+            const json r = json::parse(req.body, nullptr, false);
+            std::lock_guard<std::mutex> lock(seen_mutex);
+            of.client_id = "cid-" + std::to_string(++of.clients);
+            of.redirect = r["redirect_uris"][0];
+            res.status = 201;
+            res.set_content(json{{"client_id", of.client_id}}.dump(), "application/json");
+        });
+        server.Get("/as/authorize", [&](const httplib::Request& req, httplib::Response& res) {
+            std::lock_guard<std::mutex> lock(seen_mutex);
+            if (req.get_param_value("response_type") != "code" ||
+                req.get_param_value("client_id") != of.client_id ||
+                req.get_param_value("redirect_uri") != of.redirect ||
+                req.get_param_value("code_challenge_method") != "S256") {
+                res.status = 400;
+                return;
+            }
+            of.challenge = req.get_param_value("code_challenge");
+            of.scope = req.get_param_value("scope");
+            of.resource = req.get_param_value("resource");
+            res.set_redirect(of.redirect + "?code=code-1&state=" + req.get_param_value("state"));
+        });
+        server.Post("/as/revoke", [&](const httplib::Request& req, httplib::Response&) {
+            std::lock_guard<std::mutex> lock(seen_mutex);
+            of.refresh.erase(req.get_param_value("token"));
+            of.revoked = req.get_param_value("token") + " " + req.get_param_value("token_type_hint");
+        });
+        server.Post("/as/token", [&](const httplib::Request& req, httplib::Response& res) {
+            std::lock_guard<std::mutex> lock(seen_mutex);
+            const std::string grant = req.get_param_value("grant_type");
+            auto refuse = [&] {
+                res.status = 400;
+                res.set_content(R"({"error":"invalid_grant","error_description":"no"})",
+                                "application/json");
+            };
+            if (grant == "authorization_code") {
+                const std::string v = req.get_param_value("code_verifier");
+                unsigned char h[SHA256_DIGEST_LENGTH];
+                SHA256(reinterpret_cast<const unsigned char*>(v.data()), v.size(), h);
+                if (req.get_param_value("code") != "code-1" || b64url(h, sizeof h) != of.challenge ||
+                    req.get_param_value("redirect_uri") != of.redirect)
+                    return refuse();
+            } else if (grant == "refresh_token") {
+                if (!of.refresh.erase(req.get_param_value("refresh_token"))) return refuse();
+            } else {
+                return refuse();
+            }
+            const std::string n = std::to_string(++of.tokens);
+            of.access.insert("at-" + n);
+            of.refresh.insert("rt-" + n);
+            res.set_content(json{{"access_token", "at-" + n},
+                                 {"token_type", "Bearer"},
+                                 {"expires_in", 3600},
+                                 {"refresh_token", "rt-" + n}}
+                                .dump(),
+                            "application/json");
+        });
+        const int port = server.bind_to_any_port("127.0.0.1");
+        base = "http://127.0.0.1:" + std::to_string(port);
+        std::thread serving([&] { server.listen_after_bind(); });
+        server.wait_until_ready();
+        auto all_seen = [&] {
+            std::lock_guard<std::mutex> lock(seen_mutex);
+            std::string s;
+            for (const auto& l : seen) s += l + "\n";
+            return s;
+        };
+
+        auto set_servers_key = [&](const std::string& value) {
+            const fs::path f = tapto::config_path(tapto::Level::Global);
+            tapto::Config cfg = tapto::Config::load(f);
+            if (value.empty()) cfg.unset("mcp-servers");
+            else cfg.set("mcp-servers", value);
+            fs::create_directories(f.parent_path(), ec);
+            cfg.save(f);
+        };
+
+        // No servers file: loaded, no tools, and the prompt says where it goes.
+        // The default is in the user's settings, ~/.tapto/plugins/mcp/.
+        const fs::path default_file = tapto::plugin_user_folder("mcp") / "servers.json";
+        {
+            tapto::Plugins plugins;
+            CHECK_EQ(plugins.add_file(mcp_module, /*writable=*/false), "");
+            CHECK_EQ(names(plugins.tools()), "");
+            CHECK_TRUE(contains(plugins.prompt(), "there is no servers file at " + default_file.u8string()));
+            CHECK_TRUE(contains(plugins.prompt(), "config set mcp-servers"));
+            CHECK_TRUE(contains(plugins.prompt(), "not instructions"));
+            // Only named: not made.
+            CHECK_TRUE(!fs::exists(default_file.parent_path(), ec));
+        }
+
+        set_env("TAPTO_TEST_MCP_TOKEN", "tok-mcp");
+        fs::create_directories(default_file.parent_path(), ec);
+        const fs::path servers_file = default_file;
+        {
+            const std::string exe = mcp_server.u8string();
+            const json servers = {
+                {"mcpServers",
+                 {{"fake", {{"command", exe}, {"env", {{"FAKE_TOKEN", "env:TAPTO_TEST_MCP_TOKEN"}}}}},
+                  {"ro", {{"command", exe}, {"readOnly", "all"}, {"tools", {"write"}}}},
+                  {"old", {{"command", exe}, {"env", {{"FAKE_MCP_VERSION", "1999-01-01"}}}}},
+                  {"missing", {{"command", "no-such-program-tapto"}}},
+                  {"badref", {{"command", exe}, {"env", {{"X", "env:TAPTO_TEST_MCP_UNSET"}}}}},
+                  {"web", {{"url", "http://127.0.0.1:" + std::to_string(port) + "/mcp"},
+                           {"bearer", "env:TAPTO_TEST_MCP_TOKEN"}}},
+                  {"remote", {{"url", "http://example.com/mcp"}}},
+                  {"off", {{"command", exe}, {"disabled", true}}}}}};
+            std::ofstream(servers_file) << servers.dump(2);
+        }
+
+        {
+            tapto::Plugins plugins;
+            CHECK_EQ(plugins.add_file(mcp_module, /*writable=*/false), "");
+            auto tools = plugins.tools();
+            // Read-only ones only; "ro" says all of its tools are, and offers one.
+            CHECK_EQ(names(tools), "mcp_fake_dotted_name mcp_fake_echo mcp_fake_exit mcp_fake_fail "
+                                   "mcp_fake_image mcp_fake_slow mcp_ro_write mcp_web_lookup");
+            const auto loaded = plugins.loaded();
+            CHECK_TRUE(loaded.size() == 1 && loaded[0].tools == 9 && loaded[0].write_tools == 1);
+
+            const std::string prompt = plugins.prompt();
+            CHECK_TRUE(contains(prompt, "- fake: 7 tools"));
+            CHECK_TRUE(contains(prompt, "- ro: 1 tools"));
+            CHECK_TRUE(contains(prompt, "- web: 1 tools"));
+            CHECK_TRUE(contains(prompt, "- old: not available (it speaks MCP 1999-01-01"));
+            CHECK_TRUE(contains(prompt, "- missing: not available ("));
+            CHECK_TRUE(contains(prompt, "- badref: not available (env.X: "));
+            CHECK_TRUE(contains(prompt, "- remote: not available (its url is plain http to example.com"));
+            CHECK_TRUE(!contains(prompt, "- off"));
+            // The file, and the tokens it may hold, stay out of the model's reach.
+            CHECK_TRUE(folders.get("@mcp") == nullptr);
+
+            // The schema as the providers take it.
+            if (const ToolSpec* echo = find_tool(tools, "mcp_fake_echo")) {
+                const json& p = echo->parameters;
+                CHECK_TRUE(!p.contains("$schema") && !p.contains("additionalProperties") &&
+                           !p.contains("$defs"));
+                CHECK_EQ(p["properties"]["text"].value("type", std::string()), "string");
+                CHECK_EQ(p["properties"]["opt"]["properties"]["n"].value("type", std::string()),
+                         "integer");
+                CHECK_TRUE(!p["properties"]["opt"].contains("additionalProperties"));
+                CHECK_TRUE(contains(echo->description, "[MCP server fake] The echo tool."));
+            } else {
+                CHECK_TRUE(false);
+            }
+
+            Context ctx;
+            CHECK_EQ(call(tools, ctx, "mcp_fake_echo", {{"text", "hi"}}),
+                     R"(echo {"text":"hi"} token=tok-mcp pinged)");
+            CHECK_EQ(call(tools, ctx, "mcp_fake_dotted_name", json::object()),
+                     "called dotted.name");
+            CHECK_EQ(call(tools, ctx, "mcp_fake_fail", json::object()), "ERROR: it broke");
+            const std::string img = call(tools, ctx, "mcp_fake_image", json::object());
+            CHECK_TRUE(contains(img, "[image attached]"));
+            CHECK_TRUE(contains(img, "(image/jpeg) saved to @tmp/"));
+            CHECK_EQ(call(tools, ctx, "mcp_ro_write", json::object()), "wrote");
+
+            // Cancelled: the server is told, and the next call goes on as usual.
+            {
+                CancellationToken token;
+                token.setCheckFn([] { return true; });
+                Context cancelled;
+                cancelled.cancel = &token;
+                CHECK_EQ(call(tools, cancelled, "mcp_fake_slow", json::object()),
+                         "ERROR: cancelled by the user.");
+            }
+            CHECK_EQ(call(tools, ctx, "mcp_fake_echo", {{"text", "again"}}),
+                     R"(echo {"text":"again"} token=tok-mcp pinged)");
+            // A server that exits under a call: an error, then started again.
+            CHECK_TRUE(starts_with(call(tools, ctx, "mcp_fake_exit", json::object()),
+                                   "ERROR: the MCP server fake failed: the server has exited"));
+            CHECK_EQ(call(tools, ctx, "mcp_fake_echo", {{"text", "back"}}),
+                     R"(echo {"text":"back"} token=tok-mcp pinged)");
+
+            // Over HTTP: the token as a bearer, the session on every later request.
+            CHECK_EQ(call(tools, ctx, "mcp_web_lookup", json::object()), "web lookup");
+            const std::string web = all_seen();
+            CHECK_TRUE(contains(web, "POST initialize Bearer tok-mcp \n"));
+            CHECK_TRUE(contains(web, "POST notifications/initialized Bearer tok-mcp sess-1\n"));
+            CHECK_TRUE(contains(web, "POST tools/call Bearer tok-mcp sess-1\n"));
+
+            bool unloaded = false;
+            CHECK_TRUE(plugins.remove("mcp", &unloaded));
+            CHECK_TRUE(unloaded);
+            CHECK_TRUE(contains(all_seen(), "DELETE sess-1\n"));
+        }
+
+        // Loaded rw, the writing tool is offered too.
+        {
+            tapto::Plugins plugins;
+            CHECK_EQ(plugins.add_file(mcp_module, /*writable=*/true), "");
+            const auto tools = plugins.tools();
+            CHECK_TRUE(find_tool(tools, "mcp_fake_write") != nullptr);
+            Context ctx;
+            CHECK_EQ(call(tools, ctx, "mcp_fake_write", json::object()), "wrote");
+        }
+
+        // mcp-servers names another file, which then is the list.
+        const fs::path other_file = fake_home / "mcp.json";
+        set_servers_key(other_file.u8string());
+        {
+            tapto::Plugins plugins;
+            CHECK_EQ(plugins.add_file(mcp_module, false), "");
+            CHECK_EQ(names(plugins.tools()), "");
+            CHECK_TRUE(contains(plugins.prompt(), "the servers file " + other_file.u8string() +
+                                                      " (mcp-servers) is missing"));
+        }
+
+        // A server behind OAuth: no tools until the user logs in, then a
+        // token kept between sessions and renewed when it is refused.
+        {
+            const std::string kept = "oauth.tapto-test-oauth";
+            tapto::store_plugin_secret("mcp", kept, "");
+            set_env("TAPTO_MCP_TEST_LOGIN", "get");
+            std::ofstream(other_file)
+                << json{{"mcpServers",
+                         {{"tapto-test-oauth", {{"url", base + "/secure"}}},
+                          {"static", {{"url", base + "/secure"}, {"bearer", "wrong"}}}}}}
+                       .dump();
+            {
+                tapto::Plugins plugins;
+                CHECK_EQ(plugins.add_file(mcp_module, false), "");
+                auto tools = plugins.tools();
+                CHECK_EQ(names(tools), "");
+                CHECK_TRUE(contains(plugins.prompt(),
+                                    "- tapto-test-oauth: needs the user to log in, with `/mcp login tapto-test-oauth`"));
+                CHECK_TRUE(contains(plugins.prompt(),
+                                    "- static: not available (it refused the credentials it is configured with"));
+                const auto commands = plugins.commands();
+                CHECK_TRUE(commands.size() == 1 && commands[0].name == "mcp" &&
+                           starts_with(commands[0].usage, "/mcp list"));
+
+                Context ctx;
+                std::optional<std::string> out = plugins.run_command("mcp", "list", ctx);
+                CHECK_TRUE(out && contains(*out, "tapto-test-oauth (http): needs a login: /mcp login tapto-test-oauth"));
+                CHECK_TRUE(out && contains(*out, "static (http): not available ("));
+                CHECK_TRUE(!plugins.run_command("nosuch", "", ctx));
+                CHECK_EQ(plugins.run_command("mcp", "dance", ctx).value_or(""),
+                         "Usage: /mcp list | login <server> | logout <server> | reload");
+                CHECK_EQ(plugins.run_command("mcp", "login static", ctx).value_or(""),
+                         "static does not log in: its entry gives its own credentials.");
+                CHECK_TRUE(starts_with(plugins.run_command("mcp", "login nope", ctx).value_or(""),
+                                       "There is no MCP server 'nope'."));
+                CHECK_EQ(plugins.run_command("mcp", "logout tapto-test-oauth", ctx).value_or(""),
+                         "tapto-test-oauth is not logged in.");
+
+                CHECK_EQ(plugins.run_command("mcp", "login tapto-test-oauth", ctx).value_or(""),
+                         "Logged in to tapto-test-oauth: 1 tools.");
+                CHECK_EQ(of.scope, "mcp.read");
+                CHECK_EQ(of.resource, base + "/secure");
+                tools = plugins.tools();
+                CHECK_EQ(names(tools), "mcp_tapto-test-oauth_lookup");
+                CHECK_EQ(call(tools, ctx, "mcp_tapto-test-oauth_lookup", json::object()),
+                         "secure lookup at-1");
+                CHECK_TRUE(!plugins.take_tools_changed());
+                const auto stored = tapto::load_plugin_secret("mcp", kept);
+                CHECK_TRUE(stored && contains(*stored, "\"refresh_token\":\"rt-1\""));
+            }
+
+            // The next session: the kept access token is refused, so the
+            // refresh token renews it.
+            {
+                std::lock_guard<std::mutex> lock(seen_mutex);
+                of.access.clear();
+            }
+            {
+                tapto::Plugins plugins;
+                CHECK_EQ(plugins.add_file(mcp_module, false), "");
+                const auto tools = plugins.tools();
+                CHECK_EQ(names(tools), "mcp_tapto-test-oauth_lookup");
+                Context ctx;
+                CHECK_EQ(call(tools, ctx, "mcp_tapto-test-oauth_lookup", json::object()),
+                         "secure lookup at-2");
+                const auto stored = tapto::load_plugin_secret("mcp", kept);
+                CHECK_TRUE(stored && contains(*stored, "\"refresh_token\":\"rt-2\""));
+
+                // Refused mid-session and renewed under the call.
+                {
+                    std::lock_guard<std::mutex> lock(seen_mutex);
+                    of.access.clear();
+                }
+                CHECK_EQ(call(tools, ctx, "mcp_tapto-test-oauth_lookup", json::object()),
+                         "secure lookup at-3");
+                CHECK_TRUE(!plugins.take_tools_changed());
+
+                // Refused with nothing to renew it: a login again.
+                {
+                    std::lock_guard<std::mutex> lock(seen_mutex);
+                    of.access.clear();
+                    of.refresh.clear();
+                }
+                const std::string r = call(tools, ctx, "mcp_tapto-test-oauth_lookup", json::object());
+                CHECK_TRUE(contains(r, "wants the user to log in again; ask them to run "
+                                       "`/mcp login tapto-test-oauth`"));
+                CHECK_TRUE(plugins.take_tools_changed());
+                CHECK_EQ(names(plugins.tools()), "");
+                CHECK_TRUE(contains(call(tools, ctx, "mcp_tapto-test-oauth_lookup", json::object()),
+                                    "no longer offers mcp_tapto-test-oauth_lookup"));
+                // The refused refresh token is forgotten with its login.
+                CHECK_TRUE(!tapto::load_plugin_secret("mcp", kept));
+
+                // Logged in again, then out: the server revokes the refresh
+                // token, and the kept login and the tools go.
+                CHECK_EQ(plugins.run_command("mcp", "login tapto-test-oauth", ctx).value_or(""),
+                         "Logged in to tapto-test-oauth: 1 tools.");
+                CHECK_TRUE(contains(plugins.run_command("mcp", "list", ctx).value_or(""),
+                                    "tapto-test-oauth (http): 1 tools, logged in"));
+                CHECK_EQ(plugins.run_command("mcp", "logout tapto-test-oauth", ctx).value_or(""),
+                         "Logged out of tapto-test-oauth; its tools are gone until /mcp login "
+                         "tapto-test-oauth. The server revoked the login.");
+                CHECK_EQ(of.revoked, "rt-4 refresh_token");
+                CHECK_TRUE(!tapto::load_plugin_secret("mcp", kept));
+                CHECK_EQ(names(plugins.tools()), "");
+
+                // A server added to the file comes in with /mcp reload.
+                std::ofstream(other_file)
+                    << json{{"mcpServers",
+                             {{"tapto-test-oauth", {{"url", base + "/secure"}}},
+                              {"local", {{"command", mcp_server.u8string()}, {"tools", {"echo"}}}}}}}
+                           .dump();
+                const std::string reloaded = plugins.run_command("mcp", "reload", ctx).value_or("");
+                CHECK_TRUE(starts_with(reloaded, "Read " + other_file.u8string() + " again."));
+                CHECK_TRUE(contains(reloaded, "local (stdio): 1 tools"));
+                CHECK_EQ(names(plugins.tools()), "mcp_local_echo");
+
+                // Edited between turns: taken in before the next, only the
+                // servers whose entry changed started or stopped.
+                bool changed = false;
+                CHECK_EQ(plugins.before_turn(ctx, changed), "");
+                CHECK_TRUE(!changed);
+                auto write_servers = [&](const json& servers) {
+                    std::ofstream(other_file) << json{{"mcpServers", servers}}.dump();
+                };
+                const json oauth_entry = {{"url", base + "/secure"}};
+                const json local_entry = {{"command", mcp_server.u8string()}, {"tools", {"echo"}}};
+                write_servers({{"tapto-test-oauth", oauth_entry},
+                               {"local", local_entry},
+                               {"local2", local_entry}});
+                std::string note = plugins.before_turn(ctx, changed);
+                CHECK_TRUE(changed);
+                CHECK_TRUE(starts_with(note, "MCP: started local2.") || starts_with(note, "MCP: started local2\n"));
+                CHECK_TRUE(contains(note, "local2: 1 tools"));
+                CHECK_TRUE(!contains(note, "restarted"));
+                CHECK_EQ(names(plugins.tools()), "mcp_local2_echo mcp_local_echo");
+                CHECK_EQ(plugins.before_turn(ctx, changed = false), "");
+                CHECK_TRUE(!changed);
+
+                json local_more = local_entry;
+                local_more["tools"] = {"echo", "fail"};
+                write_servers({{"tapto-test-oauth", oauth_entry}, {"local", local_more}});
+                note = plugins.before_turn(ctx, changed);
+                CHECK_TRUE(changed);
+                CHECK_TRUE(starts_with(note, "MCP: restarted local; stopped local2"));
+                CHECK_EQ(names(plugins.tools()), "mcp_local_echo mcp_local_fail");
+
+                // Half saved: the servers keep running, said once.
+                std::ofstream(other_file) << R"({"mcpServers": {"local": )";
+                note = plugins.before_turn(ctx, changed = false);
+                CHECK_TRUE(contains(note, "is not valid JSON; the servers keep running as they were"));
+                CHECK_EQ(names(plugins.tools()), "mcp_local_echo mcp_local_fail");
+                CHECK_EQ(plugins.before_turn(ctx, changed = false), "");
+                // Saved whole again, as it was: nothing to do.
+                write_servers({{"tapto-test-oauth", oauth_entry}, {"local", local_more}});
+                CHECK_EQ(plugins.before_turn(ctx, changed = false), "");
+                CHECK_TRUE(!changed);
+                Context call_ctx;
+                CHECK_EQ(call(plugins.tools(), call_ctx, "mcp_local_fail", json::object()),
+                         "ERROR: it broke");
+            }
+            set_env("TAPTO_MCP_TEST_LOGIN", "");
+            tapto::store_plugin_secret("mcp", kept, "");
+        }
+
+        // A secret longer than one credential holds comes back whole.
+        {
+            const std::string big(5000, 'k');
+            CHECK_EQ(tapto::store_plugin_secret("mcp", "tapto-test-big", big + "x"), "");
+            CHECK_EQ(tapto::store_plugin_secret("mcp", "tapto-test-big", big), "");
+            CHECK_TRUE(tapto::load_plugin_secret("mcp", "tapto-test-big") == big);
+            CHECK_EQ(tapto::store_plugin_secret("mcp", "tapto-test-big", "short"), "");
+            CHECK_TRUE(tapto::load_plugin_secret("mcp", "tapto-test-big") == std::string("short"));
+            CHECK_EQ(tapto::store_plugin_secret("mcp", "tapto-test-big", ""), "");
+            CHECK_TRUE(!tapto::load_plugin_secret("mcp", "tapto-test-big"));
+            CHECK_TRUE(!tapto::store_plugin_secret("mcp", "no/slash", "x").empty());
+        }
+
+#ifdef _WIN32
+        // A batch file, as npx is (npx.cmd): run under cmd.exe, an argument
+        // with a space kept whole, and one cmd.exe would read refused.
+        {
+            const fs::path cmd_file = fake_home / "fake server.cmd";
+            std::ofstream(cmd_file) << "@\"" << mcp_server.string() << "\" %*\r\n";
+            const json servers = {
+                {"servers",
+                 {{"viacmd", {{"command", cmd_file.u8string()}, {"args", {"a b", "c"}},
+                              {"tools", {"echo"}},
+                              {"env", {{"FAKE_TOKEN", "via cmd"}}}}},
+                  {"pct", {{"command", cmd_file.u8string()}, {"args", {"50%"}}}}}}};
+            std::ofstream(other_file) << servers.dump();
+            tapto::Plugins plugins;
+            CHECK_EQ(plugins.add_file(mcp_module, false), "");
+            const auto tools = plugins.tools();
+            CHECK_EQ(names(tools), "mcp_viacmd_echo");
+            Context ctx;
+            CHECK_EQ(call(tools, ctx, "mcp_viacmd_echo", {{"text", "x"}}),
+                     R"(echo {"text":"x"} token=via cmd pinged)");
+            CHECK_TRUE(contains(plugins.prompt(), "- pct: not available (the argument '50%'"));
+        }
+#endif
+
+        // A servers file that is not one.
+        std::ofstream(other_file) << R"({"servers": 3})";
+        {
+            tapto::Plugins plugins;
+            CHECK_EQ(plugins.add_file(mcp_module, false), "");
+            CHECK_TRUE(contains(plugins.prompt(), "has no \"mcpServers\" object"));
+        }
+        set_servers_key("");
+        server.stop();
+        serving.join();
+    }
+
 
     tapto::set_granted_folders(nullptr);
     fs::remove(cwd / "probe-input.txt", ec);

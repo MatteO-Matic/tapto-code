@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iterator>
 #include <map>
 #include <mutex>
@@ -34,6 +35,7 @@
 #  endif
 #  include <windows.h>
 #  include <softpub.h>
+#  include <wincred.h>
 #  include <wincrypt.h>
 #  include <wintrust.h>
 #else
@@ -151,12 +153,149 @@ void mem_free(void* p, const std::string& who) {
     std::free(p);
 }
 
+// --- a plugin's secrets ------------------------------------------------------------
+
+#ifdef _WIN32
+std::wstring widen(const std::string& s);
+#endif
+
+bool is_valid_secret_name(const std::string& name) {
+    if (name.empty() || name.size() > 64) return false;
+    for (unsigned char c : name) {
+        if (!std::isalnum(c) && c != '.' && c != '_' && c != '-') return false;
+    }
+    return true;
+}
+
+#ifdef _WIN32
+// A generic credential holds at most CRED_MAX_CREDENTIAL_BLOB_SIZE (2560)
+// bytes, and a token can be longer: the first credential holds the number of
+// parts and the first part, "<target>#2" on the rest.
+constexpr std::size_t kCredPart = 2048;
+
+std::wstring cred_target(const std::string& plugin, const std::string& name, std::size_t part) {
+    std::string t = "tapto/plugin/" + plugin + "/" + name;
+    if (part > 1) t += "#" + std::to_string(part);
+    return widen(t);
+}
+
+std::optional<std::string> cred_read(const std::wstring& target) {
+    PCREDENTIALW cred = nullptr;
+    if (!CredReadW(target.c_str(), CRED_TYPE_GENERIC, 0, &cred)) return std::nullopt;
+    std::string v(reinterpret_cast<const char*>(cred->CredentialBlob), cred->CredentialBlobSize);
+    CredFree(cred);
+    return v;
+}
+
+// The number of parts the secret has now, 0 when there is none.
+std::size_t cred_parts(const std::string& plugin, const std::string& name) {
+    const auto first = cred_read(cred_target(plugin, name, 1));
+    if (!first) return 0;
+    const std::size_t nl = first->find('\n');
+    return nl == std::string::npos ? 1 : static_cast<std::size_t>(std::atoi(first->c_str()));
+}
+#else
+fs::path secrets_file(const std::string& plugin) {
+    return global_dir() / "plugin-secrets" / (plugin + ".json");
+}
+#endif
+
+} // namespace
+
+std::string store_plugin_secret(const std::string& plugin, const std::string& name,
+                                const std::string& value) {
+    if (!is_valid_plugin_name(plugin) || !is_valid_secret_name(name))
+        return "'" + name + "' is not a secret's name ([A-Za-z0-9._-], at most 64)";
+#ifdef _WIN32
+    // What was there goes first, so a shorter secret leaves no parts behind.
+    const std::size_t old_parts = cred_parts(plugin, name);
+    for (std::size_t i = old_parts; i >= 1; --i)
+        CredDeleteW(cred_target(plugin, name, i).c_str(), CRED_TYPE_GENERIC, 0);
+    if (value.empty()) return "";
+    const std::size_t parts = (value.size() + kCredPart - 1) / kCredPart;
+    for (std::size_t i = 1; i <= parts; ++i) {
+        std::string blob = value.substr((i - 1) * kCredPart, kCredPart);
+        if (i == 1) blob = std::to_string(parts) + "\n" + blob;
+        const std::wstring target = cred_target(plugin, name, i);
+        CREDENTIALW c{};
+        c.Type = CRED_TYPE_GENERIC;
+        c.TargetName = const_cast<wchar_t*>(target.c_str());
+        c.CredentialBlobSize = static_cast<DWORD>(blob.size());
+        c.CredentialBlob = reinterpret_cast<LPBYTE>(blob.data());
+        c.Persist = CRED_PERSIST_LOCAL_MACHINE;
+        wchar_t user[] = L"tapto-code";
+        c.UserName = user;
+        if (!CredWriteW(&c, 0))
+            return "Credential Manager refused it (CredWrite error " +
+                   std::to_string(GetLastError()) + ")";
+    }
+    return "";
+#else
+    const fs::path file = secrets_file(plugin);
+    std::error_code ec;
+    json all = json::object();
+    {
+        std::ifstream in(file);
+        if (in) {
+            all = json::parse(in, nullptr, false);
+            if (!all.is_object()) all = json::object();
+        }
+    }
+    if (value.empty()) all.erase(name);
+    else all[name] = value;
+    fs::create_directories(file.parent_path(), ec);
+    fs::permissions(file.parent_path(), fs::perms::owner_all, fs::perm_options::replace, ec);
+    // Written beside it, made the user's alone, then put in its place.
+    const fs::path tmp = file.string() + ".new";
+    {
+        std::ofstream out(tmp, std::ios::trunc);
+        if (!out) return "cannot write " + tmp.u8string();
+    }
+    fs::permissions(tmp, fs::perms::owner_read | fs::perms::owner_write,
+                    fs::perm_options::replace, ec);
+    {
+        std::ofstream out(tmp, std::ios::trunc);
+        out << all.dump();
+        if (!out) return "cannot write " + tmp.u8string();
+    }
+    fs::rename(tmp, file, ec);
+    if (ec) return "cannot write " + file.u8string() + ": " + ec.message();
+    return "";
+#endif
+}
+
+std::optional<std::string> load_plugin_secret(const std::string& plugin, const std::string& name) {
+    if (!is_valid_plugin_name(plugin) || !is_valid_secret_name(name)) return std::nullopt;
+#ifdef _WIN32
+    const auto first = cred_read(cred_target(plugin, name, 1));
+    if (!first) return std::nullopt;
+    const std::size_t nl = first->find('\n');
+    if (nl == std::string::npos) return first;
+    const std::size_t parts = static_cast<std::size_t>(std::atoi(first->c_str()));
+    std::string value = first->substr(nl + 1);
+    for (std::size_t i = 2; i <= parts; ++i) {
+        const auto part = cred_read(cred_target(plugin, name, i));
+        if (!part) return std::nullopt; // half a token is none
+        value += *part;
+    }
+    return value;
+#else
+    std::ifstream in(secrets_file(plugin));
+    if (!in) return std::nullopt;
+    const json all = json::parse(in, nullptr, false);
+    if (!all.is_object() || !all.contains(name) || !all[name].is_string()) return std::nullopt;
+    return all[name].get<std::string>();
+#endif
+}
+
+namespace {
+
 // --- the host a plugin sees ----------------------------------------------------
 //
 // One per plugin, so its log lines and its calls carry its name. It lives as
 // long as the module may call it: until the module is freed, or until exit.
 
-class Host : public ITaptoHost {
+class Host : public ITaptoHost, public ITaptoHostSecrets {
 public:
     explicit Host(std::string name) : m_name(std::move(name)) {}
 
@@ -165,6 +304,10 @@ public:
         if (scom::IsEqualGUID(riid, scom::IID_IBase) ||
             scom::IsEqualGUID(riid, IID_ITaptoHost)) {
             *ppv = static_cast<ITaptoHost*>(this);
+            return scom::OK;
+        }
+        if (scom::IsEqualGUID(riid, IID_ITaptoHostSecrets)) {
+            *ppv = static_cast<ITaptoHostSecrets*>(this);
             return scom::OK;
         }
         *ppv = nullptr;
@@ -233,6 +376,52 @@ public:
         return scom::OK;
     }
 
+    // A reference from the plugin's own settings, resolved as a secret config
+    // key is. Only while it is being configured, which is when the user's or
+    // the policy's settings are what it is reading.
+    SRESULT SCOM_CALL ResolveSecret(const char* ref, char*& value_out) override {
+        if (!m_configuring && !m_command) return scom::ERR_BAD_CONTEXT;
+        const Secret s = resolve_secret(ref ? ref : "");
+        TaptoString v = TaptoString::copy(
+            s.ok() ? s.value : !s.error.empty() ? s.error : std::string("the secret is empty"));
+        if (!v) return scom::ERR_NO_MEMORY;
+        mem_free(value_out, m_name); // an inout: the old value is ours to free
+        value_out = v.detach();
+        return s.ok() ? scom::OK : scom::ERR_NOT_FOUND;
+    }
+
+    // Its own secrets, kept between sessions: while it is configured or called.
+    SRESULT SCOM_CALL StoreSecret(const char* name, const char* value) override {
+        if (!m_configuring && !m_call) return scom::ERR_BAD_CONTEXT;
+        const std::string err = store_plugin_secret(m_name, name ? name : "", value ? value : "");
+        if (err.empty()) return scom::OK;
+        Log(("StoreSecret: " + err).c_str());
+        return scom::ERR_BAD_ARGUMENT;
+    }
+    SRESULT SCOM_CALL LoadSecret(const char* name, char*& value_out) override {
+        if (!m_configuring && !m_call) return scom::ERR_BAD_CONTEXT;
+        const auto v = load_plugin_secret(m_name, name ? name : "");
+        if (!v) return scom::ERR_NOT_FOUND;
+        TaptoString s = TaptoString::copy(*v);
+        if (!s) return scom::ERR_NO_MEMORY;
+        mem_free(value_out, m_name); // an inout: the old value is ours to free
+        value_out = s.detach();
+        return scom::OK;
+    }
+
+    // A Configure in progress: when ResolveSecret answers.
+    struct Configuring {
+        explicit Configuring(Host& h) : host(h) { host.m_configuring = true; }
+        ~Configuring() { host.m_configuring = false; }
+        Host& host;
+    };
+    // A command of the user's in progress (inside a Call): ResolveSecret too.
+    struct Commanding {
+        explicit Commanding(Host& h) : host(h) { host.m_command = true; }
+        ~Commanding() { host.m_command = false; }
+        Host& host;
+    };
+
     // The call in progress: what the per-call functions act on.
     struct Call {
         Call(Host& h, Context& c, std::string display) : host(h) {
@@ -251,6 +440,8 @@ public:
 private:
     std::string m_name;
     Context* m_call = nullptr;
+    bool m_configuring = false;
+    bool m_command = false;
     std::string m_display; // the call's first path argument, as the model wrote it
 };
 
@@ -460,6 +651,14 @@ struct Plugins::Loaded {
     std::unique_ptr<Host> host;
     scom::Ptr<ITaptoPlugin> plugin;
     scom::QIPtr<ITaptoPluginPrompt> prompt;
+    scom::QIPtr<ITaptoPluginTools> tool_list; // tools known once configured
+    scom::QIPtr<ITaptoPluginCommands> command; // its /<name>, when it declares one
+    scom::QIPtr<ITaptoPluginEvents> event_sink; // its events, when it subscribed to any
+    std::set<std::string> events;               // those it subscribed to
+    std::string command_usage;
+    std::string command_description;
+    std::string tool_list_text;   // what it last said, to see a change
+    bool tools_changed = false;   // a call changed them; see take_tools_changed
 
     // Shutdown and release, and free the module if it says it can be. When it
     // cannot, the host stays alive for it: `keep_host` is set and the caller
@@ -470,6 +669,9 @@ struct Plugins::Loaded {
             if (u) u->Shutdown();
             u.Release();
             prompt.Release();
+            tool_list.Release();
+            command.Release();
+            event_sink.Release();
             plugin.Release();
         }
         // Without the exports nothing of it was ever called, so it can go.
@@ -495,25 +697,37 @@ struct Plugins::Loaded {
         }
         const std::string arg_text = args.dump(-1, ' ', false, json::error_handler_t::replace);
 
-        Host::Call scope(*host, ctx, display);
+        // `t` is one of `tools`, which the call may replace: what is needed of
+        // it afterwards is copied first.
+        const std::string tool_name = t.name;
         TaptoString out;
         SRESULT r = scom::ERR_BAD_OBJECT;
-        try {
-            r = plugin->CallTool(t.name.c_str(), arg_text.c_str(), out.out());
-        } catch (...) {
-            // No exception may cross the boundary; one that does from a
-            // module built by this compiler is at least reported.
-            return "ERROR: the " + name + " plugin failed (an exception escaped " + t.name + ").";
+        {
+            Host::Call scope(*host, ctx, display);
+            try {
+                r = plugin->CallTool(tool_name.c_str(), arg_text.c_str(), out.out());
+            } catch (...) {
+                // No exception may cross the boundary; one that does from a
+                // module built by this compiler is at least reported.
+                return "ERROR: the " + name + " plugin failed (an exception escaped " + tool_name +
+                       ").";
+            }
         }
+        reread_tools();
         if (r != scom::OK) {
             return "ERROR: the " + name + " plugin could not make the call (status " +
                    std::to_string(r) + ").";
         }
-        return overflow(out.str(), t.name);
+        return overflow(out.str(), tool_name);
     }
+
+    // After a call: its tools again, from ITaptoPluginTools, when it has that.
+    void reread_tools();
 };
 
 namespace {
+
+std::string read_tools(const json& list, Plugins::Loaded& l);
 
 // Reads and checks what Describe said; fills `l`. "" when it is fine.
 std::string read_description(const std::string& text, Plugins::Loaded& l, bool check_name) {
@@ -563,9 +777,38 @@ std::string read_description(const std::string& text, Plugins::Loaded& l, bool c
             return "its folder's key '" + l.folder_key + "' is not one of its config keys";
     }
 
+    if (d.contains("command")) {
+        const json& c = d["command"];
+        if (!c.is_object() || !c.contains("usage") || !c["usage"].is_string())
+            return "its command has no usage";
+        l.command_usage = c["usage"];
+        l.command_description = c.value("description", std::string());
+        // /<name> and nothing else: the tool-name rule, for commands.
+        if (l.command_usage.rfind("/" + name, 0) != 0 ||
+            (l.command_usage.size() > name.size() + 1 && l.command_usage[name.size() + 1] != ' '))
+            return "its command '" + l.command_usage + "' is not /" + name;
+    }
+    if (d.contains("events")) {
+        if (!d["events"].is_array()) return "its events is not a list";
+        // An event this host does not have is let be: a newer plugin in an
+        // older host is never told of it.
+        for (const auto& e : d["events"]) {
+            if (!e.is_string()) return "an event it subscribes to is not a name";
+            l.events.insert(e.get<std::string>());
+        }
+    }
     if (!d.contains("tools") || !d["tools"].is_array()) return "it lists no tools";
+    return read_tools(d["tools"], l);
+}
+
+// Reads and checks a list of tools, Describe's or ITaptoPluginTools'; they
+// replace the ones `l` had. "" when it is fine.
+std::string read_tools(const json& list, Plugins::Loaded& l) {
+    const std::string& name = l.name;
+    std::vector<Plugins::Loaded::Tool> tools;
     std::set<std::string> seen;
-    for (const auto& t : d["tools"]) {
+    for (const auto& t : list) {
+        if (!t.is_object()) return "a tool is not an object";
         Plugins::Loaded::Tool tool;
         tool.name = t.value("name", std::string());
         if (tool.name.rfind(name + "_", 0) != 0 || tool.name.size() == name.size() + 1)
@@ -589,8 +832,9 @@ std::string read_description(const std::string& text, Plugins::Loaded& l, bool c
                 spec.erase("x-tapto-path");
             }
         }
-        l.tools.push_back(std::move(tool));
+        tools.push_back(std::move(tool));
     }
+    l.tools = std::move(tools);
     return "";
 }
 
@@ -611,7 +855,10 @@ std::string plugin_config(const Plugins::Loaded& l, std::string& error) {
             c[key] = *v;
         }
     }
-    // "folder" is no plugin's key: those are all "<plugin>-...".
+    // "folder" and "user_folder" are no plugin's keys: those are all
+    // "<plugin>-...". The user folder is only named: not made, and not in
+    // the folder set unless the plugin declares it as its folder.
+    c["user_folder"] = plugin_user_folder(l.name).u8string();
     if (!l.folder_label.empty()) {
         c["folder"] = {{"path", l.folder_root.u8string()},
                        {"label", l.folder_label},
@@ -620,7 +867,49 @@ std::string plugin_config(const Plugins::Loaded& l, std::string& error) {
     return c.dump();
 }
 
+// Configures the plugin with its settings, and then takes its tools from
+// ITaptoPluginTools when it has that. "" when it is ready.
+std::string configure_plugin(Plugins::Loaded& l) {
+    std::string why;
+    const std::string cfg = plugin_config(l, why);
+    if (!why.empty()) return why;
+    {
+        Host::Configuring scope(*l.host);
+        if (l.plugin->Configure(cfg.c_str()) != scom::OK) return "it refused its configuration";
+    }
+    if (!l.tool_list) return "";
+    TaptoString list;
+    json tools;
+    if (l.tool_list->Tools(list.out()) == scom::OK) {
+        l.tool_list_text = list.str();
+        tools = json::parse(l.tool_list_text, nullptr, false);
+    }
+    if (!tools.is_array()) {
+        l.tools.clear();
+        return "it gave no list of its tools";
+    }
+    if (std::string bad = read_tools(tools, l); !bad.empty()) {
+        l.tools.clear();
+        return bad;
+    }
+    return "";
+}
+
 } // namespace
+
+void Plugins::Loaded::reread_tools() {
+    if (!tool_list) return;
+    TaptoString list;
+    if (tool_list->Tools(list.out()) != scom::OK || list.str() == tool_list_text) return;
+    tool_list_text = list.str();
+    const json t = json::parse(tool_list_text, nullptr, false);
+    std::string bad = t.is_array() ? read_tools(t, *this) : "it gave no list of its tools";
+    if (!bad.empty()) {
+        mclog("[plugins] " + name + ": its tools after a call: " + bad + "\n");
+        tools.clear();
+    }
+    tools_changed = true;
+}
 
 // --- the public side ---------------------------------------------------------------
 
@@ -779,16 +1068,29 @@ std::string attach(Plugins::Loaded& p, bool check_name, bool configure = true,
     if (!p.folder_mode.empty()) {
         if (std::string why = add_folder(p, folders); !why.empty()) return why;
     }
-    std::string why;
-    const std::string cfg = plugin_config(p, why);
-    if (why.empty() && p.plugin->Configure(cfg.c_str()) != scom::OK)
-        why = "it refused its configuration";
-    if (!why.empty()) {
+    p.tool_list = scom::QIPtr<ITaptoPluginTools>(p.plugin.get());
+    if (std::string why = configure_plugin(p); !why.empty()) {
         if (!p.folder_label.empty()) folders->remove_system(p.folder_label);
         p.folder_label.clear();
         return why;
     }
     p.prompt = scom::QIPtr<ITaptoPluginPrompt>(p.plugin.get());
+    if (!p.events.empty()) {
+        p.event_sink = scom::QIPtr<ITaptoPluginEvents>(p.plugin.get());
+        if (!p.event_sink) {
+            if (!p.folder_label.empty()) folders->remove_system(p.folder_label);
+            p.folder_label.clear();
+            return "it subscribes to events, but cannot take them";
+        }
+    }
+    if (!p.command_usage.empty()) {
+        p.command = scom::QIPtr<ITaptoPluginCommands>(p.plugin.get());
+        if (!p.command) {
+            if (!p.folder_label.empty()) folders->remove_system(p.folder_label);
+            p.folder_label.clear();
+            return "it declares a command, but cannot run one";
+        }
+    }
     return "";
 }
 
@@ -869,9 +1171,8 @@ std::string Plugins::add(const std::string& name, bool writable, bool by_policy)
         // says of the folder stays true.
         if (!l->folder_label.empty() && m_folders) {
             m_folders->set_system_writable(l->folder_label, l->folder_writable());
-            std::string cfg_error;
-            const std::string cfg = plugin_config(*l, cfg_error);
-            if (cfg_error.empty()) (void)l->plugin->Configure(cfg.c_str());
+            if (std::string why = configure_plugin(*l); !why.empty())
+                mclog("[plugins] " + name + ": " + why + "\n");
         }
         return "";
     }
@@ -942,16 +1243,22 @@ std::vector<ToolSpec> Plugins::tools() const {
     std::vector<ToolSpec> out;
     for (const auto& lp : m_loaded) {
         Loaded* l = lp.get();
-        for (std::size_t i = 0; i < l->tools.size(); ++i) {
-            const Loaded::Tool& t = l->tools[i];
+        for (const Loaded::Tool& t : l->tools) {
             // A writing tool is not refused when called: it is never offered.
             if (t.writes && !l->writable) continue;
             ToolSpec spec;
             spec.name = t.name;
             spec.description = t.description;
             spec.parameters = t.schema;
-            spec.executor = [l, i](Context& ctx, const json& in) {
-                return l->call(l->tools[i], ctx, in);
+            // By name: a call may replace the plugin's tools under a turn
+            // that still holds these, and a tool that has gone says so.
+            spec.executor = [l, name = t.name](Context& ctx, const json& in) -> std::string {
+                for (const auto& now : l->tools) {
+                    if (now.name != name) continue;
+                    if (now.writes && !l->writable) break;
+                    return l->call(now, ctx, in);
+                }
+                return "ERROR: the " + l->name + " plugin no longer offers " + name + ".";
             };
             out.push_back(std::move(spec));
         }
@@ -971,6 +1278,72 @@ std::string Plugins::prompt() const {
         if (!text.empty()) out += (out.empty() ? "" : "\n\n") + text;
     }
     return out;
+}
+
+std::string Plugins::before_turn(Context& ctx, bool& changed) {
+    std::string text;
+    for (auto& l : m_loaded) {
+        if (!l->event_sink || !l->events.count("before_turn")) continue;
+        TaptoString out;
+        SRESULT r = scom::ST_FALSE;
+        {
+            // As a command is run: it reads the user's settings at their word.
+            Host::Call scope(*l->host, ctx, "");
+            Host::Commanding commanding(*l->host);
+            try {
+                r = l->event_sink->OnEvent("before_turn", "{}", out.out());
+            } catch (...) {
+                mclog("[plugins] " + l->name + ": an exception escaped its before_turn\n");
+            }
+        }
+        if (!out.empty()) text += (text.empty() ? "" : "\n") + out.str();
+        if (r != scom::OK) continue;
+        l->reread_tools();
+        l->tools_changed = false;
+        changed = true;
+    }
+    return text;
+}
+
+std::vector<Plugins::Command> Plugins::commands() const {
+    std::vector<Command> out;
+    for (const auto& l : m_loaded) {
+        if (l->command) out.push_back({l->name, l->command_usage, l->command_description});
+    }
+    return out;
+}
+
+std::optional<std::string> Plugins::run_command(const std::string& name, const std::string& args,
+                                                Context& ctx) {
+    for (auto& l : m_loaded) {
+        if (l->name != name || !l->command) continue;
+        TaptoString out;
+        SRESULT r = scom::ERR_BAD_OBJECT;
+        {
+            Host::Call scope(*l->host, ctx, "");
+            Host::Commanding commanding(*l->host);
+            try {
+                r = l->command->RunCommand(args.c_str(), out.out());
+            } catch (...) {
+                return "the " + name + " plugin failed (an exception escaped its command)";
+            }
+        }
+        l->reread_tools();
+        l->tools_changed = false; // the caller rebuilds after a command anyway
+        if (r != scom::OK)
+            return "the " + name + " plugin could not run the command (status " + std::to_string(r) + ")";
+        return out.str();
+    }
+    return std::nullopt;
+}
+
+bool Plugins::take_tools_changed() {
+    bool changed = false;
+    for (auto& l : m_loaded) {
+        changed = changed || l->tools_changed;
+        l->tools_changed = false;
+    }
+    return changed;
 }
 
 std::vector<Plugins::Entry> Plugins::loaded() const {

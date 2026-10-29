@@ -39,7 +39,7 @@ endif()
 # on MSVC, so a warning it trips here is fixed in the library and released.
 set(LIBTAPTO_BUILD_TESTS ON CACHE BOOL "" FORCE)
 include(FetchContent)
-set(LIBTAPTO_PIN "v0.5.0")
+set(LIBTAPTO_PIN "v0.6.0")
 if(NOT DEFINED CACHE{LIBTAPTO_TAG})
   set(LIBTAPTO_TAG "${LIBTAPTO_PIN}" CACHE STRING "libtapto version to build against")
 elseif(NOT LIBTAPTO_TAG STREQUAL LIBTAPTO_PIN)
@@ -222,6 +222,21 @@ target_link_libraries(tapto-plugin-memory PRIVATE nlohmann_json::nlohmann_json)
 tapto_code_plugin(tapto-plugin-skills skills plugins/skills/skills.cpp)
 target_link_libraries(tapto-plugin-skills PRIVATE nlohmann_json::nlohmann_json)
 
+# mcp: a bridge to MCP servers, listed in the file mcp-servers names; stdio
+# servers run as child processes, Streamable HTTP ones go through httplib and
+# OpenSSL as jira's requests do.
+tapto_code_plugin(tapto-plugin-mcp mcp plugins/mcp/mcp.cpp)
+target_link_libraries(tapto-plugin-mcp PRIVATE
+  httplib::httplib OpenSSL::SSL OpenSSL::Crypto nlohmann_json::nlohmann_json)
+target_compile_definitions(tapto-plugin-mcp PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
+if(WIN32)
+  # shell32/ole32 open the browser for an OAuth login.
+  target_link_libraries(tapto-plugin-mcp PRIVATE crypt32 ws2_32 shell32 ole32)
+else()
+  find_package(Threads REQUIRED)
+  target_link_libraries(tapto-plugin-mcp PRIVATE Threads::Threads)
+endif()
+
 # --- Tests ------------------------------------------------------------------
 # Plain executables with assertions of their own, so `ctest` needs no test
 # framework fetched or installed. Run with: ctest --test-dir build --output-on-failure
@@ -341,6 +356,12 @@ foreach(_probe IN ITEMS probe probe-misnamed)
 endforeach()
 target_compile_definitions(tapto-probe-misnamed PRIVATE PROBE_BAD_NAME)
 
+# A stdio MCP server for the mcp plugin to start: line-delimited JSON-RPC on
+# its stdin and stdout.
+add_executable(test-mcp-server tests/plugin/mcp_server.cpp)
+target_link_libraries(test-mcp-server PRIVATE nlohmann_json::nlohmann_json)
+tapto_code_warnings(test-mcp-server)
+
 add_executable(test-plugins
   tests/test_plugins.cpp
   src/plugins.cpp
@@ -358,13 +379,14 @@ else()
   target_link_libraries(test-plugins PRIVATE ${CMAKE_DL_LIBS})
 endif()
 add_dependencies(test-plugins tapto-probe tapto-probe-misnamed tapto-plugin-image
-  tapto-plugin-jira tapto-plugin-skills)
+  tapto-plugin-jira tapto-plugin-skills tapto-plugin-mcp test-mcp-server)
 tapto_code_warnings(test-plugins)
 
 add_test(NAME plugins COMMAND test-plugins
   $<TARGET_FILE:tapto-probe> $<TARGET_FILE:tapto-probe-misnamed>
   $<TARGET_FILE:tapto-plugin-image> $<TARGET_FILE:tapto-plugin-jira>
-  $<TARGET_FILE:tapto-plugin-skills>)
+  $<TARGET_FILE:tapto-plugin-skills> $<TARGET_FILE:tapto-plugin-mcp>
+  $<TARGET_FILE:test-mcp-server>)
 
 # Markdown table rendering: wrapping (not clipping), alignment, inline styling
 # and CJK width are exercised at explicit widths via render_markdown (pure,

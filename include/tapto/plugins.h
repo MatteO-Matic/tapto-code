@@ -37,7 +37,12 @@ class FolderSet;
 //  - Output: every result goes through overflow(), like the core tools'.
 //  - Config: the plugin's keys are named "<plugin>-...", so it cannot read a
 //    core key or another plugin's. A key it declares secret is resolved here
-//    (wincred:, env:, cmd:) and handed over as its value in Configure.
+//    (wincred:, env:, cmd:) and handed over as its value in Configure; a
+//    reference it finds in its own settings (a file a key names) it hands to
+//    ITaptoHostSecrets during Configure, and nowhere else.
+//  - Tools known late: a plugin with ITaptoPluginTools is asked for its tools
+//    after every Configure (an MCP bridge knows them once its servers run),
+//    and they go through the same rules as Describe's.
 //  - Folder: a plugin may declare one folder of its own, per project at
 //    plugin_folder() or per user at plugin_user_folder(), or the one a config
 //    key of its own names (an absolute path, which the policy may set): the
@@ -106,6 +111,16 @@ std::filesystem::path plugin_folder(const std::string& name);
 // The folder a plugin whose folder is per user gets: ~/.tapto/plugins/<name>/.
 std::filesystem::path plugin_user_folder(const std::string& name);
 
+// The secrets a plugin keeps between sessions (ITaptoHostSecrets::StoreSecret
+// and LoadSecret): in Windows Credential Manager as generic credentials named
+// "tapto/plugin/<plugin>/<name>", split over several past the size one may
+// hold; elsewhere in <global dir>/plugin-secrets/<plugin>.json, which only
+// the user can read. `name` is [A-Za-z0-9._-], at most 64. An empty value
+// forgets it. "" on success, else what went wrong.
+std::string store_plugin_secret(const std::string& plugin, const std::string& name,
+                                const std::string& value);
+std::optional<std::string> load_plugin_secret(const std::string& plugin, const std::string& name);
+
 class Plugins {
 public:
     Plugins();
@@ -138,6 +153,33 @@ public:
 
     // System-prompt text: each plugin's fixed prompt and its changing one.
     std::string prompt() const;
+
+    // True once, after a call changed a plugin's tools (an MCP server that
+    // wants a login again): the caller rebuilds its tool table and prompt
+    // before the next turn, since a turn keeps the tools it started with.
+    bool take_tools_changed();
+
+    // Before each turn: every plugin subscribed to before_turn is told
+    // (ITaptoPluginEvents; the mcp plugin takes in its edited servers
+    // file). What they say for the user, "" for nothing; `changed`
+    // is set when the caller must rebuild its tools and prompt.
+    std::string before_turn(Context& ctx, bool& changed);
+
+    // The commands loaded plugins offer, each named after its plugin
+    // (ITaptoPluginCommands): /mcp for mcp.
+    struct Command {
+        std::string name; // without the '/'
+        std::string usage;
+        std::string description;
+    };
+    std::vector<Command> commands() const;
+
+    // Runs /<name> <args> as its plugin's command, as a call is run (ESC
+    // through ctx.cancel). Its text for the user; nullopt when no loaded
+    // plugin has that command. The caller rebuilds its tools and prompt
+    // after it.
+    std::optional<std::string> run_command(const std::string& name, const std::string& args,
+                                           Context& ctx);
 
     struct Entry {
         std::string name;

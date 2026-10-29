@@ -364,6 +364,57 @@ when the plugin is loaded, so after changing them `/remove-plugin jira` and
 `/add-plugin jira` again. Loaded read-only it searches and reads issues;
 `rw` adds creating, updating, commenting on and transitioning them.
 
+**MCP servers.** The `mcp` plugin offers the tools of
+[Model Context Protocol](https://modelcontextprotocol.io) servers. It reads
+them from `~/.tapto/plugins/mcp/servers.json`, a JSON file in the layout other
+MCP clients use. The model cannot read that file, and it is never taken from
+the project, so a cloned repository cannot start programs.
+`config set mcp-servers <absolute path>` uses another file; set by policy, it
+fixes the list for everyone.
+
+```json
+{"mcpServers": {
+  "github": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"],
+             "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "wincred:github"}},
+  "docs":   {"url": "https://docs.example.com/mcp", "bearer": "env:DOCS_TOKEN",
+             "readOnly": "all", "tools": ["search", "fetch"]}
+}}
+```
+
+A server with a `command` is started by tapto-code and spoken to over its
+standard input and output; the command is looked up in `PATH`, never in the
+project. One with a `url` is reached over Streamable HTTP, `https` unless it is
+on this machine. Each value in `env` and `headers`, and `bearer` (sent as
+`Authorization: Bearer ...`), may be an `env:`, `cmd:` or `wincred:` reference
+instead of the secret itself. A server's tools are named
+`mcp_<server>_<tool>`. Loaded read-only, the plugin offers only the tools a
+server marks read-only; `"readOnly": "all"`, `"none"` or a list of tool names
+says otherwise for that server, `"tools"` offers only those listed,
+`"timeout"` is the seconds a call may take (`mcp-timeout`, default 120), and
+`"disabled": true` leaves it out. The servers start when the plugin is loaded,
+and the file is watched: save it during a session and, before your next
+message goes to the model, the servers you added or changed start and those
+you took out stop, while the rest keep running (a file saved half-written
+leaves them all as they were). The system prompt names each server and says
+so when one would not start, and a local server that exits is started again
+on its next call.
+
+```
+/mcp list                 each server, its tools, or why it has none
+/mcp login <server>       log in to a server that asks for it, in your browser
+/mcp logout <server>      forget that login (the server revokes it, if it can)
+/mcp reload               restart every server, changed or not
+```
+
+A remote server that asks for a login (OAuth, as the MCP specification
+describes it) has no tools until you run `/mcp login <server>`: your browser
+opens at the server's login page (ESC gives up), and once you have logged in
+its tools are there. The login is kept in Windows Credential Manager
+(elsewhere in a file only you can read, `~/.tapto/plugin-secrets/mcp.json`)
+and renewed by itself, so you log in again only when the server stops
+accepting it; the model tells you when that happens. A server with its own
+`bearer` or `Authorization` header is never logged in to.
+
 **First run:** if no provider/api-key is configured, tapto-code prompts for them
 interactively and saves them to the global (`~/.tapto`) config, then starts
 the chat. You can also set them manually instead:

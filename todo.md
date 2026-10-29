@@ -104,6 +104,16 @@ moving the project memory into a plugin is listed there.
 - [ ] **[protected] commands.** Run code the model generated (a test it
       wrote, a script) in a sandbox instead of with the user's full rights.
       Look at the AppContainer code in the test project.
+      - Decided 29 Oct: a sandbox plugin, behind a capability interface of
+        its own, not an event (events only notify; what hands a decision of
+        the core's to a plugin is an interface that says so). Roughly
+        `ITaptoPluginSandbox::Run(spec, result_out)`, spec `{program, args,
+        cwd, env, read: [paths], write: [paths], network, timeout}`, the
+        paths worked out by the host's folder rules and only enforced by the
+        plugin; ESC through IsCancelled. Fails closed: a [protected] command
+        with no sandbox loaded is refused, never run bare. One provider,
+        chosen by the host (a policy key), not the first to load. Designed
+        when the plugin is started, not frozen ahead of it.
 
 ---
 
@@ -581,6 +591,62 @@ the tool-name rule and the prompt alone; Jira then adds config, secrets, rw.
         plugin's own config keys says.
       - Open: one folder only, so a policy `skills-folder` replaces the
         user's own skills rather than adding the organization's to them.
+- [x] `mcp` plugin (`plugins/mcp/mcp.cpp`), the MCP bridge the decisions
+      above left room for. Decided 29 Oct: stdio and Streamable HTTP both;
+      the servers in `~/.tapto/plugins/mcp/servers.json`, or the file
+      `mcp-servers` names (the skills-folder pattern: a policy setting it
+      fixes the list), in the `mcpServers` layout. The host names every
+      plugin's user folder in Configure (`"user_folder"`), without making it
+      or putting it in the folder set, so the model cannot read the file and
+      the tokens it may hold. Its env/header values are resolved by the host (libtapto `v0.6.0`:
+      `ITaptoHostSecrets::ResolveSecret`, during Configure only); its tools
+      from `ITaptoPluginTools`, which the loader asks after every Configure,
+      since they are known only once the servers run; a tool writes unless
+      the server says `readOnlyHint`, overridden per server with
+      `"readOnly": "all" | "none" | [names]`. Tools `mcp_<server>_<tool>`,
+      cut to 64 with a hash; schemas rebuilt from the keywords every provider
+      reads, `$ref`s into `$defs` inlined. stdio commands from `PATH` only
+      (never the project), a `.cmd` under `cmd.exe /d /s /c` with `"`, `%`, `!`
+      refused in its arguments, the server in a kill-on-close job (a process
+      group elsewhere); plain http to loopback only. Cancel sends
+      `notifications/cancelled`; a stdio server that exited is started again
+      on its next call. Tested in test-plugins with `tests/plugin/
+      mcp_server.cpp` and an httplib server.
+      - OAuth, decided 29 Oct for a user's own OAuth server: the spec's flow
+        (401 + resource_metadata, RFC 9728 and 8414 discovery, dynamic client
+        registration anew at each login so the loopback port may change,
+        authorization code + PKCE S256, `state`, `resource`). The login is
+        the user's `/mcp login <server>`, not the model's (an `mcp_login`
+        tool came first and went: a model should not open browser windows),
+        so ESC cancels it and nothing blocks the start. `/mcp logout`
+        revokes (RFC 7009) where the server has an endpoint for it and
+        forgets the tokens; `/mcp list`; `/mcp reload` configures again from
+        the same settings. Plugin commands (libtapto `ITaptoPluginCommands`):
+        `"command": {usage, description}` in Describe, only `/<plugin>`, run
+        after every core command so none is shadowed, as a call (ESC, the
+        secret store; ResolveSecret too, for reload), text to the user only,
+        tools and prompt rebuilt after. The loader also asks for a plugin's
+        tools after every CallTool, so a server that wants a login again
+        loses its tools from the next turn (a turn keeps the tools it
+        started with). The servers file is watched: the `before_turn` event
+        (libtapto `ITaptoPluginEvents::OnEvent(event, json, text_out)`,
+        subscribed to with `"events"` in Describe, run as a command is), which
+        stats it (mtime
+        and size) and reads it only when that moved; the servers are synced
+        by entry (new or changed start, removed stop, the rest run on), and
+        a file that does not parse keeps them as they were. Tokens
+        through `ITaptoHostSecrets::StoreSecret`/`LoadSecret`: Credential
+        Manager `tapto/plugin/<plugin>/<name>`, split past 2048 bytes, else
+        `~/.tapto/plugin-secrets/<plugin>.json` 0600. Renewed at start when
+        expired or refused, and once under a refused call. Debug builds take
+        `TAPTO_MCP_TEST_LOGIN=get` in place of a browser, for the tests.
+        Untested against a real authorization server.
+      - Not done: the servers' `instructions` from initialize, which would put
+        server text in the system prompt; resources and prompts; the old SSE
+        transport; sampling, roots and elicitation (the client declares none).
+      - `notifications/tools/list_changed` is let go: the list is the one
+        from the start until the plugin is loaded again.
+      - Untested on Linux and against real servers.
 - [ ] General instructions (a code style guide, say), asked for by a user
       27 Oct: not a plugin. The core's `system-prompt-append` and
       `system-prompt-append-file` already do it, and a policy key cannot be

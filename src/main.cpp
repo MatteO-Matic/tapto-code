@@ -2010,6 +2010,13 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
             std::vector<std::string> tool_names;
             for (const auto& t : context.tools) tool_names.push_back(t.name);
             ui::print_help(tool_names);
+            const auto commands = plugins.commands();
+            if (!commands.empty()) {
+                std::string text = "  Plugin commands:\n";
+                for (const auto& c : commands)
+                    text += "    " + c.usage + (c.description.empty() ? "" : "\n      " + c.description) + "\n";
+                ui::print_line(text);
+            }
             continue;
         }
 
@@ -2296,6 +2303,41 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
             continue;
         }
 
+        // A plugin's own command, /<plugin> ...: after every command of the
+        // core's, so it can shadow none. Its text is the user's, never the
+        // model's.
+        if (line.size() > 1 && line[0] == '/') {
+            const std::size_t sp = line.find_first_of(" \t");
+            const std::string cmd = line.substr(1, sp == std::string::npos ? std::string::npos : sp - 1);
+            const auto commands = plugins.commands();
+            if (std::any_of(commands.begin(), commands.end(),
+                            [&](const auto& c) { return c.name == cmd; })) {
+                cancel_token.reset();
+                context.cancel = &cancel_token;
+                std::optional<std::string> text;
+                {
+                    // ESC cancels a command as it does a turn (a login waits
+                    // for the browser).
+                    RawTerminal raw;
+                    text = plugins.run_command(
+                        cmd, sp == std::string::npos ? std::string() : trim(line.substr(sp)), context);
+                }
+                ui::print_line(text ? *text : "'/" + cmd + "' is no command now.");
+                rebuild_tools_and_prompt();
+                continue;
+            }
+        }
+
+        // A plugin's own settings edited since the last turn (the mcp
+        // plugin's servers file): taken in before the turn starts, since a
+        // turn keeps the tools it starts with.
+        {
+            bool changed = false;
+            if (const std::string note = plugins.before_turn(context, changed); !note.empty())
+                ui::print_line(note);
+            if (changed) rebuild_tools_and_prompt();
+        }
+
         ui::print_prompt_accepted();
 
         // Reset the cancellation state for this turn. The ESC poll runs in
@@ -2327,6 +2369,9 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
                 }
             }
         }
+        // A turn keeps the tools it started with; one that changed a plugin's
+        // (an MCP login) shows in the next.
+        if (plugins.take_tools_changed()) rebuild_tools_and_prompt();
         persist();
     }
 #ifndef _WIN32

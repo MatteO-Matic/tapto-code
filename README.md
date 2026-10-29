@@ -302,6 +302,11 @@ gives the model its tools for the session:
 /remove-plugin jira
 ```
 
+These last for the session. `/add-plugin jira --project` (or `--global`) also
+loads it at every start, in this project or everywhere, and `/remove-plugin
+jira --project` stops that again: where your global config loads the plugin,
+it writes `plugin.jira = off` to the project's.
+
 A plugin loaded read-only does not offer its writing tools at all; loading it
 again with `rw` adds them. Its tools are named `<plugin>_...`, and a path a
 tool takes goes through the same rules as the editor's before the plugin sees
@@ -446,6 +451,41 @@ Chat config keys:
 | `system-prompt-append-file` | no | unset — same, from a text file; added after `system-prompt-append` |
 | `trace-file`    | no       | unset — set to a path to enable diagnostic logging  |
 | `plugin.<name>` | no       | unset — `ro`, `rw` or `off`: load that plugin at every start, one key per plugin |
+
+### Settings from the chat, and settings for one program
+
+A chat command that changes a setting saves it where it is usually wanted, and
+says where it went: `/cot` in your global config, `/effort` and
+`/add-command` in the project's. Add `--session` (just this session),
+`--project` or `--global` anywhere on the line to choose instead, and `unset`
+to remove a setting there, so the next level applies again:
+
+```
+/cot off --session        just for now
+/cot on --global          from now on, everywhere
+/effort high              this project
+/effort unset --project   back to what your global config says
+/add-command --global build cmake --build build
+```
+
+`/cot` or `/effort` alone shows the value in force and where it comes from.
+Folders granted with `/add-folder` are never saved: they last for the session
+they were given in.
+
+The config is shared by tapto-code, tapto-word and tapto-vnc. A key written
+after a program's name is for that program alone, and wins over the shared
+one at the same level:
+
+```
+# all three
+print-cot = true
+# tapto-code only
+tapto-code.print-cot = false
+tapto-word.plugin.mcp = rw
+```
+
+`config set tapto-code.print-cot false` writes one. A chat command changes
+the key the value in force came from, so a split you made by hand stays.
 
 ### System prompt
 

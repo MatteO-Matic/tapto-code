@@ -7,6 +7,7 @@
 // read (the editor, the built-ins, a [ro] command) and nothing can write.
 
 #include "tapto/overflow.h"
+#include "tapto/program.h"
 
 #include "tapto/commands.h"
 #include "tapto/context.h"
@@ -120,6 +121,7 @@ std::string named_file(const std::string& result) {
 } // namespace
 
 int main() {
+    tapto::set_program_name("tapto-code"); // in what the library says
     const fs::path fake_home = fs::temp_directory_path() / "tapto-overflow-tests-home";
     const std::string saved_home = get_env(kHomeVar);
     std::error_code ec;

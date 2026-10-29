@@ -10,6 +10,7 @@
 // which is the only place the difference shows up.
 
 #include "tapto/commands.h"
+#include "tapto/program.h"
 #include "tapto/context.h"
 #include "tapto/tool_registry.h"
 #include "tapto/tools.h"
@@ -119,6 +120,7 @@ ToolExecutorFn find_run_command(Context& ctx) {
 } // namespace
 
 int main() {
+    tapto::set_program_name("tapto-code"); // in what the library says
     Context ctx;
     ctx.tools = tapto::builtin_tools();
     ToolExecutorFn edit = find_editor(ctx);
@@ -864,7 +866,11 @@ int main() {
         fs::create_directories(outside / ".git", ec);
         write_raw((outside / "docs" / "note.txt").string(), "alpha\nbeta\n");
 
+        // The working directory as the set's home root, as main has it: the
+        // path rules (libtapto's PathRules) take the working directory from
+        // the set.
         tapto::FolderSet granted;
+        CHECK_EQ(granted.set_home(fs::current_path().string(), /*writable=*/true), "");
         std::string label;
         CHECK_EQ(granted.add(outside.string(), &label, /*writable=*/false), "");
         CHECK_EQ(label, "tapto-edit-tests-granted");

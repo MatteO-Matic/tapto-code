@@ -39,7 +39,7 @@ endif()
 # on MSVC, so a warning it trips here is fixed in the library and released.
 set(LIBTAPTO_BUILD_TESTS ON CACHE BOOL "" FORCE)
 include(FetchContent)
-set(LIBTAPTO_PIN "v0.6.0")
+set(LIBTAPTO_PIN "v0.7.0")
 if(NOT DEFINED CACHE{LIBTAPTO_TAG})
   set(LIBTAPTO_TAG "${LIBTAPTO_PIN}" CACHE STRING "libtapto version to build against")
 elseif(NOT LIBTAPTO_TAG STREQUAL LIBTAPTO_PIN)
@@ -68,33 +68,6 @@ FetchContent_Declare(libtapto
   GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(libtapto)
-
-# stb: public-domain, header-only image decoding (stb_image) and PNG encoding
-# (stb_image_write), which the image plugin (plugins/image) uses to turn an
-# image file into the PNG it attaches for the model. The implementations are
-# compiled into the plugin by defining the STB_*_IMPLEMENTATION macros there;
-# the core does not link it.
-#
-# The stb repository has no tags (it releases by branch), so the version is
-# taken from `master`, the stable release line (`dev` holds work in progress).
-# It is pinned to a branch rather than a commit for now; if stb's master
-# advances in a way that breaks the build, pin a specific commit here instead.
-# The repo has no CMakeLists.txt, so it is populated rather than made
-# available -- the CMP0169 policy (CMake 3.31+) keeps the direct Populate call
-# from warning about itself.
-if(POLICY CMP0169)
-  cmake_policy(SET CMP0169 OLD)
-endif()
-FetchContent_Declare(stb
-  GIT_REPOSITORY https://github.com/nothings/stb.git
-  GIT_TAG        master
-)
-FetchContent_GetProperties(stb)
-if(NOT stb_POPULATED)
-  FetchContent_Populate(stb)
-endif()
-add_library(stb_headers INTERFACE)
-target_include_directories(stb_headers INTERFACE "${stb_SOURCE_DIR}")
 
 # --- Version stamp ----------------------------------------------------------
 # Puts the version and the originating commit into the binary, so `version` and
@@ -134,8 +107,6 @@ endfunction()
 add_executable(tapto-code
   src/main.cpp
   src/commands.cpp
-  src/overflow.cpp
-  src/plugins.cpp
   src/prompt.cpp
   src/session.cpp
   src/tools.cpp
@@ -144,97 +115,25 @@ add_executable(tapto-code
 target_include_directories(tapto-code PRIVATE include "${TAPTO_GENERATED_DIR}")
 add_dependencies(tapto-code tapto_version)
 # The library exports nlohmann_json, httplib, OpenSSL, Threads and, on Windows,
-# advapi32/crypt32, together with CPPHTTPLIB_OPENSSL_SUPPORT.
+# advapi32/crypt32/wintrust (dl elsewhere, for its plugin loader), together
+# with CPPHTTPLIB_OPENSSL_SUPPORT.
 target_link_libraries(tapto-code PRIVATE tapto::tapto)
-# The plugin loader checks a module's Authenticode signature (WinVerifyTrust)
-# on Windows, and loads it with dlopen elsewhere.
-if(WIN32)
-  target_link_libraries(tapto-code PRIVATE wintrust)
-else()
-  target_link_libraries(tapto-code PRIVATE ${CMAKE_DL_LIBS})
-endif()
 tapto_code_warnings(tapto-code)
 
 install(TARGETS tapto-code RUNTIME DESTINATION bin)
 
 # --- Plugins ----------------------------------------------------------------
-# Modules in the one folder the loader looks in (plugin_directory_for() in
-# src/plugins.cpp): a `plugins` folder next to tapto-code.exe on Windows;
-# installed elsewhere, where the exe is in bin/, lib/tapto-code/plugins. In
-# the build tree the exe is not in a bin/, so they are built into a `plugins`
-# folder beside it on every platform, and a build in build/ finds them. A plugin
-# links only libtapto's headers (tapto/plugin.h, tapto/scom.h), never the
-# library, and whatever it needs of its own.
-function(tapto_code_plugin target name)
-  add_library(${target} MODULE ${ARGN})
-  target_include_directories(${target} PRIVATE "${libtapto_SOURCE_DIR}/include")
-  set_target_properties(${target} PROPERTIES
-    PREFIX "" OUTPUT_NAME ${name} CXX_VISIBILITY_PRESET hidden
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins")
-  # Multi-config generators would otherwise add a per-config subfolder.
-  foreach(_cfg IN ITEMS DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
-    set_target_properties(${target} PROPERTIES
-      LIBRARY_OUTPUT_DIRECTORY_${_cfg} "${CMAKE_BINARY_DIR}/plugins")
-  endforeach()
-  tapto_code_warnings(${target})
-  # Where plugin_directory_for() looks for an installed exe: beside it on
-  # Windows, the program's own lib directory elsewhere (bin/ holds programs).
-  if(WIN32)
-    install(TARGETS ${target} LIBRARY DESTINATION bin/plugins)
-  else()
-    install(TARGETS ${target} LIBRARY DESTINATION lib/tapto-code/plugins)
-  endif()
-  add_dependencies(tapto-code ${target})
-  # For a packaging project that builds this one as a subdirectory (the MSI):
-  # every plugin it must sign and scan for runtime DLLs, without a list of
-  # its own to keep in step.
-  set_property(GLOBAL APPEND PROPERTY TAPTO_CODE_PLUGINS ${target})
-endfunction()
-
-# image: image_read, for a model that can see.
-tapto_code_plugin(tapto-plugin-image image plugins/image/image.cpp)
-target_link_libraries(tapto-plugin-image PRIVATE stb_headers nlohmann_json::nlohmann_json)
-
-# jira: the Jira tools from tapto-jira; its own HTTPS client (httplib and
-# OpenSSL, the same pins the library brings). On Windows httplib reads the
-# system's root certificates through crypt32, and the browser opens through
-# shell32/ole32.
-tapto_code_plugin(tapto-plugin-jira jira plugins/jira/jira.cpp)
-# The library's OpenSSL targets are local to its directory; its choice of
-# OpenSSL is in the cache, so this finds the same one.
-find_package(OpenSSL REQUIRED)
-target_link_libraries(tapto-plugin-jira PRIVATE
-  httplib::httplib OpenSSL::SSL OpenSSL::Crypto nlohmann_json::nlohmann_json)
-target_compile_definitions(tapto-plugin-jira PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
-if(WIN32)
-  target_link_libraries(tapto-plugin-jira PRIVATE crypt32 shell32 ole32 ws2_32)
-endif()
-
-# memory: the project memory, the plugin's folder @memory and the prompt that
-# carries its index. No tools and no dependencies: the core's editor does the
-# reading and writing.
-tapto_code_plugin(tapto-plugin-memory memory plugins/memory/memory.cpp)
-target_link_libraries(tapto-plugin-memory PRIVATE nlohmann_json::nlohmann_json)
-
-# skills: instructions for kinds of task in a folder of the user's (or the
-# organization's, through skills-folder), read-only as @skills; the prompt
-# carries their index.
-tapto_code_plugin(tapto-plugin-skills skills plugins/skills/skills.cpp)
-target_link_libraries(tapto-plugin-skills PRIVATE nlohmann_json::nlohmann_json)
-
-# mcp: a bridge to MCP servers, listed in the file mcp-servers names; stdio
-# servers run as child processes, Streamable HTTP ones go through httplib and
-# OpenSSL as jira's requests do.
-tapto_code_plugin(tapto-plugin-mcp mcp plugins/mcp/mcp.cpp)
-target_link_libraries(tapto-plugin-mcp PRIVATE
-  httplib::httplib OpenSSL::SSL OpenSSL::Crypto nlohmann_json::nlohmann_json)
-target_compile_definitions(tapto-plugin-mcp PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
-if(WIN32)
-  # shell32/ole32 open the browser for an OAuth login.
-  target_link_libraries(tapto-plugin-mcp PRIVATE crypt32 ws2_32 shell32 ole32)
-else()
-  find_package(Threads REQUIRED)
-  target_link_libraries(tapto-plugin-mcp PRIVATE Threads::Threads)
+# The plugins (image, jira, mcp, memory, skills) are libtapto's, built by its
+# CMakeLists into a `plugins` folder beside tapto-code and installed to
+# bin/plugins (lib/tapto-code/plugins outside Windows) with tapto_plugin(),
+# which a plugin of tapto-code's own would use too. tapto-code is built after
+# them, so a build in build/ finds them. TAPTO_CODE_PLUGINS keeps the list
+# under the name the installer reads (every plugin it signs and scans for
+# runtime DLLs).
+get_property(_tapto_plugins GLOBAL PROPERTY TAPTO_PLUGINS)
+if(_tapto_plugins)
+  add_dependencies(tapto-code ${_tapto_plugins})
+  set_property(GLOBAL PROPERTY TAPTO_CODE_PLUGINS ${_tapto_plugins})
 endif()
 
 # --- Tests ------------------------------------------------------------------
@@ -253,7 +152,6 @@ add_executable(test-edits
   tests/test_edits.cpp
   src/tools.cpp
   src/commands.cpp
-  src/overflow.cpp
   "${libtapto_SOURCE_DIR}/test/ui_null.cpp"
 )
 target_include_directories(test-edits PRIVATE include)
@@ -304,23 +202,18 @@ add_test(NAME session COMMAND test-session)
 # (the editor tool alone, by a spelling that resolves to it -- no other tool,
 # no command cwd or %p -- and only while it is loaded rw), and what the system
 # prompt carries of it (the first 50 lines, the index). Loads the module built
-# moments ago, so the loader is compiled without the signature check.
+# moments ago, so it compiles libtapto's loader itself, without the signature
+# check (the library's copy is then never linked in).
 add_executable(test-memory
   tests/test_memory.cpp
-  src/plugins.cpp
+  "${libtapto_SOURCE_DIR}/src/plugins.cpp"
   src/tools.cpp
   src/commands.cpp
-  src/overflow.cpp
   "${libtapto_SOURCE_DIR}/test/ui_null.cpp"
 )
 target_include_directories(test-memory PRIVATE include)
 target_compile_definitions(test-memory PRIVATE TAPTO_PLUGINS_ALLOW_UNSIGNED)
 target_link_libraries(test-memory PRIVATE tapto::tapto)
-if(WIN32)
-  target_link_libraries(test-memory PRIVATE wintrust)
-else()
-  target_link_libraries(test-memory PRIVATE ${CMAKE_DL_LIBS})
-endif()
 add_dependencies(test-memory tapto-plugin-memory)
 tapto_code_warnings(test-memory)
 
@@ -333,7 +226,6 @@ add_executable(test-overflow
   tests/test_overflow.cpp
   src/tools.cpp
   src/commands.cpp
-  src/overflow.cpp
   "${libtapto_SOURCE_DIR}/test/ui_null.cpp"
 )
 target_include_directories(test-overflow PRIVATE include)
@@ -342,51 +234,8 @@ tapto_code_warnings(test-overflow)
 
 add_test(NAME overflow COMMAND test-overflow)
 
-# The plugin loader (src/plugins.cpp) with a real module: tests/plugin/probe.cpp,
-# built as it is and with a misnamed tool, and then the image plugin. A plugin
-# links only libtapto's headers (tapto/plugin.h, tapto/scom.h), never the
-# library. The test loads modules built moments ago, so it compiles the loader
-# without the signature check a Release build otherwise makes. stb builds the
-# test images and decodes what the image plugin attached.
-foreach(_probe IN ITEMS probe probe-misnamed)
-  add_library(tapto-${_probe} MODULE tests/plugin/probe.cpp)
-  target_include_directories(tapto-${_probe} PRIVATE "${libtapto_SOURCE_DIR}/include")
-  set_target_properties(tapto-${_probe} PROPERTIES PREFIX "" CXX_VISIBILITY_PRESET hidden)
-  tapto_code_warnings(tapto-${_probe})
-endforeach()
-target_compile_definitions(tapto-probe-misnamed PRIVATE PROBE_BAD_NAME)
-
-# A stdio MCP server for the mcp plugin to start: line-delimited JSON-RPC on
-# its stdin and stdout.
-add_executable(test-mcp-server tests/plugin/mcp_server.cpp)
-target_link_libraries(test-mcp-server PRIVATE nlohmann_json::nlohmann_json)
-tapto_code_warnings(test-mcp-server)
-
-add_executable(test-plugins
-  tests/test_plugins.cpp
-  src/plugins.cpp
-  src/tools.cpp
-  src/commands.cpp
-  src/overflow.cpp
-  "${libtapto_SOURCE_DIR}/test/ui_null.cpp"
-)
-target_include_directories(test-plugins PRIVATE include)
-target_compile_definitions(test-plugins PRIVATE TAPTO_PLUGINS_ALLOW_UNSIGNED)
-target_link_libraries(test-plugins PRIVATE tapto::tapto stb_headers)
-if(WIN32)
-  target_link_libraries(test-plugins PRIVATE wintrust)
-else()
-  target_link_libraries(test-plugins PRIVATE ${CMAKE_DL_LIBS})
-endif()
-add_dependencies(test-plugins tapto-probe tapto-probe-misnamed tapto-plugin-image
-  tapto-plugin-jira tapto-plugin-skills tapto-plugin-mcp test-mcp-server)
-tapto_code_warnings(test-plugins)
-
-add_test(NAME plugins COMMAND test-plugins
-  $<TARGET_FILE:tapto-probe> $<TARGET_FILE:tapto-probe-misnamed>
-  $<TARGET_FILE:tapto-plugin-image> $<TARGET_FILE:tapto-plugin-jira>
-  $<TARGET_FILE:tapto-plugin-skills> $<TARGET_FILE:tapto-plugin-mcp>
-  $<TARGET_FILE:test-mcp-server>)
+# The plugin loader and the plugins are tested by libtapto's own tests
+# (test-plugins), which run here too.
 
 # Markdown table rendering: wrapping (not clipping), alignment, inline styling
 # and CJK width are exercised at explicit widths via render_markdown (pure,

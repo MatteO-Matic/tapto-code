@@ -95,6 +95,14 @@ breaking changes and the patch number everything else.)
   `/mcp logout <server>`.
 - A plugin can bring a command of its own, named after it, such as `/mcp`;
   `/help` lists those of the plugins loaded.
+- `--session`, `--project` and `--global` on `/cot`, `/effort`,
+  `/add-command`, `/add-plugin` and `/remove-plugin` say where the change is
+  saved, and `unset` removes a setting there; every reply says where it
+  went. `/add-plugin jira --project` loads Jira at every start in this
+  project.
+- A setting can be for one program alone: `tapto-code.print-cot = false`
+  applies to tapto-code and not to tapto-word or tapto-vnc, which share the
+  config. `config set` takes such keys.
 
 ### Changed
 

@@ -5,7 +5,9 @@
 #include "tapto/commands.h"
 
 #include "tapto/context.h"
+#include "tapto/editor.h"
 #include "tapto/overflow.h"
+#include "tapto/pathrules.h"
 #include "tapto/policy.h"
 
 #include <algorithm>
@@ -42,130 +44,16 @@ namespace tapto {
 
 namespace {
 
-// The small helpers this file used to carry -- split_lines, read_file,
-// wildcard_match, is_noise_dir -- come from tapto/fstools.h now, so the glob
-// and the noise-directory list agree with the folder tools.
-
-// --- line endings ---------------------------------------------------------
+// --- path rules -----------------------------------------------------------
 //
-// Files are read and written byte-exact, and `view` renders each line with its
-// CR stripped. The model therefore composes edits in LF terms while a file
-// checked out on Windows holds CRLF, so an edit has to treat a line ending as a
-// line ending rather than as two particular bytes — otherwise every multi-line
-// str_replace on such a file fails to match.
-//
-// Files with a long Windows history can be mixed, which is why matching is a
-// per-character scan rather than normalise-then-compare: every byte outside the
-// edited span keeps whatever ending it already had.
+// The rules are libtapto's (tapto/pathrules.h), over the folders main grants;
+// the editor and find_files are libtapto's too (tapto/editor.h). What stays
+// here is what only tapto-code has: the allow-listed commands, whose cwd and
+// %p paths follow the same rules, and the built-ins (cat, ls, ...).
 
-// Length of the line ending at s[i], or 0 if there isn't one there. A lone CR
-// is deliberately not an ending: in a file that is otherwise LF or CRLF it is
-// far more likely to be data than a line break.
-size_t eol_len(const std::string& s, size_t i) {
-    if (i >= s.size()) return 0;
-    if (s[i] == '\r' && i + 1 < s.size() && s[i + 1] == '\n') return 2;
-    if (s[i] == '\n') return 1;
-    return 0;
-}
-
-// Match `needle` against `content` starting at `at`, with any line ending
-// matching any other. Returns the end offset of the match (which may differ
-// from at + needle.size(), since the endings can be of different lengths), or
-// npos if it doesn't match here.
-size_t match_at(const std::string& content, const std::string& needle, size_t at) {
-    size_t i = at, j = 0;
-    while (j < needle.size()) {
-        if (const size_t n = eol_len(needle, j)) {
-            const size_t c = eol_len(content, i);
-            if (c == 0) return std::string::npos;
-            i += c;
-            j += n;
-        } else {
-            if (i >= content.size() || content[i] != needle[j]) return std::string::npos;
-            ++i;
-            ++j;
-        }
-    }
-    return i;
-}
-
-// Every non-overlapping match of `needle`, comparing line endings loosely.
-std::vector<std::pair<size_t, size_t>> find_all_loose(const std::string& content,
-                                                      const std::string& needle) {
-    std::vector<std::pair<size_t, size_t>> hits;
-    if (needle.empty()) return hits;
-    for (size_t i = 0; i < content.size();) {
-        const size_t end = match_at(content, needle, i);
-        if (end == std::string::npos) {
-            ++i;
-        } else {
-            hits.push_back({i, end});
-            i = (end > i) ? end : i + 1;
-        }
-    }
-    return hits;
-}
-
-// The ending style a stretch of text uses. Text with no ending in it at all
-// inherits `fallback`, which is how a single-line replacement in a CRLF file
-// still gets CRLF when it turns into several lines.
-std::string eol_style(const std::string& s, const std::string& fallback) {
-    size_t crlf = 0, lf = 0;
-    for (size_t i = 0; i < s.size();) {
-        const size_t n = eol_len(s, i);
-        if (n == 2) { ++crlf; i += 2; }
-        else if (n == 1) { ++lf; ++i; }
-        else ++i;
-    }
-    if (crlf == 0 && lf == 0) return fallback;
-    return crlf >= lf ? "\r\n" : "\n";
-}
-
-// Rewrite every line ending in `text` as `eol`.
-std::string with_eol(const std::string& text, const std::string& eol) {
-    std::string out;
-    out.reserve(text.size() + text.size() / 16);
-    for (size_t i = 0; i < text.size();) {
-        if (const size_t n = eol_len(text, i)) {
-            out += eol;
-            i += n;
-        } else {
-            out += text[i++];
-        }
-    }
-    return out;
-}
-
-// Byte offset where line `line` starts (0-based, counting line endings). Past
-// the last line this is the end of the content, so inserting there appends.
-size_t line_start_offset(const std::string& s, int line) {
-    size_t off = 0;
-    int seen = 0;
-    while (seen < line && off < s.size()) {
-        if (const size_t n = eol_len(s, off)) {
-            off += n;
-            ++seen;
-        } else {
-            ++off;
-        }
-    }
-    return off;
-}
-
-bool write_file(const fs::path& path, const std::string& content) {
-    std::error_code ec;
-    if (path.has_parent_path()) fs::create_directories(path.parent_path(), ec);
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (!out) return false;
-    out << content;
-    return out.good();
-}
-
-// --- path sandbox ---------------------------------------------------------
-
-// The directory tapto-code was started in (canonicalized). All model-driven file
-// access is confined to this subtree. Computed once on first use; the process
-// never changes its working directory.
+// The directory tapto-code was started in (canonicalized): the base a
+// command's relative paths start from. Computed once on first use; the
+// process never changes its working directory.
 const fs::path& sandbox_root() {
     static const fs::path root = []() {
         std::error_code ec;
@@ -182,133 +70,43 @@ const fs::path& sandbox_root() {
 // mid-session is seen at once.
 const FolderSet* g_folders = nullptr;
 
+// The set the rules apply to: main's, or without one (the tests that run the
+// tools bare) the working directory alone, as its home root.
+const FolderSet& folder_set() {
+    if (g_folders) return *g_folders;
+    static const FolderSet cwd_only = [] {
+        FolderSet f;
+        f.set_home(sandbox_root().u8string(), /*writable=*/true);
+        return f;
+    }();
+    return cwd_only;
+}
+
+// The rules, with tapto-code's command scripts among the folders no write
+// reaches (the library protects ~/.tapto and the machine-wide store), and its
+// [ro] commands named when a read-only grant refuses a write.
+PathRules rules() {
+    static const bool protected_once = [] {
+        protect_folder(machine_script_folder());
+        protect_folder(user_script_folder());
+        set_read_only_advice(
+            "Reading it is fine (read_file, view, cat, and the commands list_commands marks "
+            "[ro]); to change it or run another command there, ask the user to grant the "
+            "folder read-write with /add-folder <path> rw.");
+        return true;
+    }();
+    (void)protected_once;
+    return PathRules(folder_set());
+}
+
 // True if `path` is `root` or under it, both already canonical.
 bool is_under(const fs::path& root, const fs::path& path) {
     const fs::path rel = path.lexically_relative(root);
     return !rel.empty() && *rel.begin() != fs::path("..");
 }
 
-// The granted folder that owns `resolved`, or null: the deepest one that
-// holds it, so tapto-code's own folders (@tmp) keep their mode inside a grant
-// or home root that covers them. `writable_only` narrows it to rw ones.
-const Folder* granted_owner(const fs::path& resolved, bool writable_only) {
-    if (!g_folders) return nullptr;
-    const Folder* f = g_folders->owner(resolved);
-    return f && (f->writable || !writable_only) ? f : nullptr;
-}
-
-// True when `resolved` is in one of tapto-code's own folders that the model
-// may only read (@tmp): what is there was written by tapto-code, so a command
-// that says it only reads may be pointed at it, although it is in ~/.tapto.
-bool in_read_only_program_folder(const fs::path& resolved) {
-    const Folder* f = granted_owner(resolved, /*writable_only=*/false);
-    return f && f->system && !f->writable;
-}
-
-// What a path may reach beyond the working directory, which every scope has.
-//
-//   Read        every granted folder, read-only ones included: a read is a
-//               read whichever spelling the model picks (the editor's view,
-//               find_files, the built-in cat/ls/head/...).
-//   Write       the granted folders marked rw: the editor's create and edit,
-//               and the cwd and %p paths of an allow-listed command --
-//               letting the model edit a folder and letting it run the
-//               project's own build there is the same trust.
-//   WorkingDir  the working directory alone.
-//
-// tapto-code's own folders (@tmp, and a plugin's folder such as @memory) are
-// in the folder set too, under '@' labels, so Read and Write reach them by
-// their mode like any grant. They are in ~/.tapto, so refuse_protected_write
-// still refuses every write there; resolve_for_editor lets the editor alone
-// write in a writable one.
-enum class Scope { Read, Write, WorkingDir };
-
-// Resolve `input` (absolute, or relative to `base`) and confirm it stays
-// within the sandbox. `base` (default: the sandbox root itself) is the
-// directory relative paths are resolved against — e.g. a `cwd` supplied to a
-// command — so a caller can target a subfolder without ever escaping the root:
-// the final check below still pins the result to the sandbox root.
-// weakly_canonical normalizes ".."/"." and resolves symlinks in the existing
-// prefix, so attempts to escape via those are caught. On success fills `out`
-// with the resolved absolute path and returns true; otherwise sets `error` and
-// returns false.
-//
-// A granted folder is reached either as "<label>/<rest>" or as an absolute
-// path under its root. The label form is taken only when resolving from the
-// working directory itself and it has no entry of that name, so a project's
-// own subfolder always wins over a grant that happens to share its name; the
-// absolute form is always unambiguous. The set's home root is the working
-// directory under its own label, so "<label>/<rest>" as the folder tools
-// print it comes back here and lands where it came from. tapto-code's own
-// '@' labels are never shadowed by a project entry.
-bool resolve_in_sandbox(const std::string& input, fs::path& out, std::string& error,
-                        const fs::path& base = fs::path(), Scope scope = Scope::Read) {
-    const fs::path& root = sandbox_root();
-    const fs::path anchor = base.empty() ? root : base;
-    const bool grants = scope != Scope::WorkingDir && g_folders != nullptr;
-    const bool writes = scope == Scope::Write;
-    std::error_code ec;
-    fs::path in_path(input);
-
-    auto refuse_read_only = [&](const Folder& f) {
-        if (f.system) {
-            error = "ERROR: '" + input + "' is in " + f.label + ", tapto-code's own folder (" +
-                    f.note + "). It can be read, not changed.";
-            return false;
-        }
-        error = "ERROR: '" + input + "' is in '" + f.label + "', which the user granted "
-                "read-only. Reading it is fine (read_file, view, cat, and the commands "
-                "list_commands marks [ro]); to change it or run another command there, ask "
-                "the user to grant the folder read-write with /add-folder <path> rw.";
-        return false;
-    };
-
-    if (grants && !in_path.is_absolute() && !in_path.empty() && anchor == root) {
-        const std::string head = in_path.begin()->string();
-        const Folder* f = g_folders->get(head);
-        // A grant's label gives way to a project entry of the same name;
-        // tapto-code's own '@' labels never do.
-        if (f && (f->system || !fs::exists(anchor / head, ec))) {
-            if (writes && !f->writable) return refuse_read_only(*f);
-            fs::path rest;
-            for (auto it = std::next(in_path.begin()); it != in_path.end(); ++it) rest /= *it;
-            fs::path abs = f->root / rest;
-            fs::path resolved = fs::weakly_canonical(abs, ec);
-            if (ec) resolved = abs.lexically_normal();
-            if (is_under(f->root, resolved)) {
-                out = resolved;
-                return true;
-            }
-        }
-    }
-
-    fs::path abs = in_path.is_absolute() ? in_path : (anchor / in_path);
-    fs::path resolved = fs::weakly_canonical(abs, ec);
-    if (ec) resolved = abs.lexically_normal();
-
-    if (is_under(root, resolved)) {
-        out = resolved;
-        return true;
-    }
-    if (grants) {
-        if (const Folder* f = granted_owner(resolved, /*writable_only=*/false)) {
-            if (writes && !f->writable) return refuse_read_only(*f);
-            out = resolved;
-            return true;
-        }
-    }
-    error = "ERROR: '" + input + "' is outside the working directory. "
-            "tapto-code can only access the folder it was started in and its "
-            "subdirectories" +
-            std::string(grants && g_folders->has_grants()
-                            ? (writes ? ", plus any folder the user has granted read-write."
-                                      : ", plus any folder the user has granted.")
-                            : ".");
-    return false;
-}
-
 // One path component compared the way the filesystem would: Windows is
-// case-insensitive, so ".GIT" names the same directory as ".git" there.
+// case-insensitive, so ".EXE" is ".exe" there.
 bool component_is(const fs::path& part, const char* name) {
 #ifdef _WIN32
     const std::string s = part.string();
@@ -325,58 +123,6 @@ bool component_is(const fs::path& part, const char* name) {
 #endif
 }
 
-// True if any component of `path` is named ".git".
-bool has_git_component(const fs::path& path) {
-    for (const auto& part : path) {
-        if (component_is(part, ".git")) return true;
-    }
-    return false;
-}
-
-// True if `dir` is a git directory judged by what it holds rather than by its
-// name: HEAD beside objects/ and refs/ is the layout git itself looks for.
-// This is what catches a repository whose git directory is not called ".git"
-// — `git init --separate-git-dir`, a linked worktree, or a bare repo planted
-// in the tree — where the name-based check has nothing to match.
-bool looks_like_git_dir(const fs::path& dir) {
-    std::error_code ec;
-    return fs::exists(dir / "HEAD", ec) && fs::is_directory(dir / "objects", ec) &&
-           fs::is_directory(dir / "refs", ec);
-}
-
-// True if writing to `resolved` would land in a repository's git directory.
-// The model has no reason to write there, and a writable git directory turns
-// every allow-listed git command into code execution: config can name a
-// core.fsmonitor or core.hooksPath command that even `git status` runs, and
-// hooks/* run on commit. Checked against whichever root the path landed in, so
-// a writable grant is covered too.
-//
-// Three ways in, because one name test isn't enough:
-//   the resolved path    the ordinary case, ".git/hooks/pre-commit";
-//   `input` as written   paths are canonicalized before they get here, so a
-//                        symlinked .git would otherwise resolve to a target
-//                        with no ".git" component left to match;
-//   an ancestor's shape  a git directory under any other name (above).
-bool in_git_dir(const fs::path& resolved, const std::string& input) {
-    const Folder* owner = granted_owner(resolved, /*writable_only=*/true);
-    const fs::path& root = owner ? owner->root : sandbox_root();
-
-    if (has_git_component(resolved.lexically_relative(root))) return true;
-    if (has_git_component(fs::path(input).lexically_normal())) return true;
-
-    // Up from the target to the root it landed in, the root included: a bare
-    // repository can sit at the top of the tree. The target itself is the
-    // starting point when it is a directory, which is what a command's `cwd`
-    // is.
-    std::error_code ec;
-    fs::path start = fs::is_directory(resolved, ec) ? resolved : resolved.parent_path();
-    for (fs::path dir = start; is_under(root, dir); dir = dir.parent_path()) {
-        if (looks_like_git_dir(dir)) return true;
-        if (dir == dir.parent_path()) break; // filesystem root, no more parents
-    }
-    return false;
-}
-
 // A path made canonical where it exists and tidied where it doesn't, so two
 // spellings of one folder compare equal.
 fs::path canonical_or_normal(const fs::path& p) {
@@ -386,8 +132,7 @@ fs::path canonical_or_normal(const fs::path& p) {
 }
 
 // is_under with the filesystem's idea of case: on Windows a folder that does
-// not exist yet keeps the case it was written in, so ".TAPTO\commands" has to
-// match "...\.tapto" by name.
+// not exist yet keeps the case it was written in.
 bool is_within(const fs::path& root, const fs::path& path) {
 #ifdef _WIN32
     auto lower = [](const fs::path& p) {
@@ -399,483 +144,6 @@ bool is_within(const fs::path& root, const fs::path& path) {
 #else
     return is_under(root, path);
 #endif
-}
-
-// The folders tapto-code keeps its own state in: ~/.tapto (the global store,
-// every project's local store and command list, saved conversations), the
-// machine-wide store, and the folders the scripts allow-listed commands name
-// live in. None of it is the model's to change, and a writable command store
-// is a way to run anything: the agent adds a command and runs it. That
-// matters as soon as the working directory contains them, which is what
-// starting tapto-code in the home folder (or at the root of a drive) does.
-std::vector<fs::path> tapto_dirs() {
-    std::vector<fs::path> dirs;
-    for (const fs::path& d : {global_dir(), config_path(Level::System).parent_path(),
-                              machine_script_folder(), user_script_folder()}) {
-        if (!d.empty()) dirs.push_back(canonical_or_normal(d));
-    }
-    return dirs;
-}
-
-// True if writing to `resolved` would land in one of tapto_dirs(), or in any
-// folder named ".tapto". As with the git directory, the path is checked as
-// resolved and as written: a symlink or junction to ~/.tapto resolves to a
-// path with no ".tapto" left in its relative part, which the canonical
-// comparison catches, while a ".tapto" that does not exist yet is caught by
-// its name.
-bool in_tapto_dir(const fs::path& resolved, const std::string& input) {
-    const Folder* owner = granted_owner(resolved, /*writable_only=*/true);
-    const fs::path& root = owner ? owner->root : sandbox_root();
-    for (const auto& part : resolved.lexically_relative(root)) {
-        if (component_is(part, ".tapto")) return true;
-    }
-    for (const auto& part : fs::path(input).lexically_normal()) {
-        if (component_is(part, ".tapto")) return true;
-    }
-    for (const fs::path& dir : tapto_dirs()) {
-        if (is_within(dir, resolved)) return true;
-    }
-    return false;
-}
-
-// Refuse a path that a write must not touch. Shared by the editor and by
-// run_command, so a command cannot reach what the editor is refused.
-//
-// A plugin's folder (the memory's @memory) sits in ~/.tapto and is refused here
-// like the rest of it: the editor's exception lives in resolve_for_editor
-// alone, so a command's cwd or %p path never reaches it, not even through a
-// writable grant that covers the home folder.
-bool refuse_protected_write(const fs::path& resolved, const std::string& input, std::string& error) {
-    if (in_git_dir(resolved, input)) {
-        error = "ERROR: '" + input + "' is inside a repository's git directory, which "
-                "tapto-code never writes to. Use an allow-listed git command instead.";
-        return true;
-    }
-    if (in_tapto_dir(resolved, input)) {
-        error = "ERROR: '" + input + "' is inside tapto-code's own folders (its settings, "
-                "allow-listed commands and scripts), which tapto-code never writes to. "
-                "Only the user can change them.";
-        return true;
-    }
-    return false;
-}
-
-// Resolve a path the model's editor tool wants to write: sandboxed, and never
-// in a git directory or tapto-code's own folders -- except that the editor,
-// and nothing else, may write in tapto-code's own writable folders (@memory),
-// which refuse_protected_write refuses as part of ~/.tapto. This is the one
-// place that exception is made. The folder's own rules still hold: nothing
-// outside it, and no symlink out of it.
-bool resolve_for_editor(const std::string& input, fs::path& out, std::string& error) {
-    if (!resolve_in_sandbox(input, out, error, fs::path(), Scope::Write)) return false;
-    if (const Folder* f = granted_owner(out, /*writable_only=*/true); f && f->system) return true;
-    return !refuse_protected_write(out, input, error);
-}
-
-// Resolve a path the model's editor tool may READ: the sandbox's read scope
-// (the working directory and every folder in the set, whatever their mode,
-// tapto-code's own included). Reads get no protected refusal -- the model may
-// look into .git and ~/.tapto.
-bool resolve_for_read(const std::string& input, fs::path& out, std::string& error) {
-    return resolve_in_sandbox(input, out, error);
-}
-
-// --- text editor tool -----------------------------------------------------
-
-std::string execute_text_editor(Context& /*context*/, const json& in) {
-    try {
-        if (!in.contains("command")) return "ERROR: 'command' not present.";
-        std::string command = in["command"];
-
-        // file_text is the content field for create/write only. The two genuinely
-        // misleading cases are str_replace and insert, where a stray file_text
-        // would otherwise be silently ignored (str_replace would delete old_str
-        // instead of writing the intended text). Fail loudly there, naming the
-        // field to use, so the model self-corrects on the first retry.
-        //
-        // view and delete simply ignore file_text: it is irrelevant to them, and
-        // rejecting it only trips the model up — it habitually emits
-        // file_text: "" on view calls, sees the error, doesn't realise it's the
-        // field it's adding, and loops (see tapto.log, the config.c session).
-        if (in.contains("file_text") &&
-            (command == "str_replace" || command == "insert")) {
-            return "ERROR: 'file_text' is only for the 'create' and 'write' commands. "
-                   "For str_replace or insert, pass the text as 'new_str' "
-                   "(insert also takes 'insert_line').";
-        }
-
-        if (command == "view") {
-            if (!in.contains("path")) return "ERROR: 'path' not present.";
-            fs::path path;
-            {
-                std::string sandbox_err;
-                // A read: the read scope (the working directory and every
-                // granted folder, whatever their mode, so .git and read-only
-                // grants stay readable), and tapto-code's own folders.
-                if (!resolve_for_read(in["path"].get<std::string>(), path, sandbox_err)) {
-                    return sandbox_err;
-                }
-            }
-            std::error_code ec;
-            if (!fs::exists(path, ec)) return "ERROR: File not found: " + path.string();
-
-            if (fs::is_directory(path, ec)) {
-                std::vector<std::string> entries;
-                for (const auto& e : fs::directory_iterator(path, ec)) {
-                    std::string name = e.path().filename().string();
-                    if (e.is_directory(ec)) name += "/";
-                    entries.push_back(name);
-                }
-                std::sort(entries.begin(), entries.end());
-                std::ostringstream out;
-                for (const auto& name : entries) out << name << "\n";
-                return out.str();
-            }
-
-            std::string content;
-            if (!read_file(path, content)) return "ERROR: Failed to read " + path.string();
-            // Numbering a binary file would put NULs and invalid UTF-8 into the
-            // model's context and the chat transcript, which the UTF-8
-            // sanitizer downstream cannot catch — they are valid UTF-8. cat,
-            // head and tail refuse the same way, so `view` must not be the way
-            // around them.
-            if (looks_binary(content)) {
-                return "ERROR: " + path.string() + " is a binary file (" +
-                       std::to_string(content.size()) + " bytes); it has no text to show.";
-            }
-            // content_lines, not split_lines: a trailing newline must not show
-            // up as an extra empty numbered line, or `view` and `wc -l` disagree
-            // about how long the file is and the model mis-aims its view_range.
-            auto lines = content_lines(content);
-            if (lines.empty()) return "(empty file)";
-
-            int start = 1;
-            int end = static_cast<int>(lines.size());
-            if (in.contains("view_range")) {
-                json range = in["view_range"];
-                if (range.is_string()) {
-                    try { range = json::parse(range.get<std::string>()); }
-                    catch (const std::exception& e) {
-                        return std::string("ERROR: 'view_range' could not be parsed: ") + e.what();
-                    }
-                }
-                if (!range.is_array() || range.size() != 2 ||
-                    !range[0].is_number_integer() || !range[1].is_number_integer()) {
-                    return "ERROR: 'view_range' must be an array of two integers, e.g. [1, 50]";
-                }
-                start = range[0];
-                end = range[1] < 0 ? static_cast<int>(lines.size()) : range[1].get<int>();
-                if (start < 1 || end > static_cast<int>(lines.size()) || start > end) {
-                    return "ERROR: Invalid line range [" + std::to_string(start) + ", " +
-                           std::to_string(end) + "]; the file has " +
-                           std::to_string(lines.size()) + " lines (use -1 as the end for the last line)";
-                }
-            }
-
-            // Cap the rendered output so a single huge file can't blow the
-            // context window / cost (in line with find_files and run_command).
-            constexpr size_t kMaxViewBytes = 64000;
-            std::ostringstream out;
-            size_t emitted = 0;
-            bool truncated = false;
-            for (int i = start - 1; i < end && i < static_cast<int>(lines.size()); ++i) {
-                std::string row = std::to_string(i + 1) + "|" + lines[i] + "\n";
-                if (emitted + row.size() > kMaxViewBytes) {
-                    truncated = true;
-                    break;
-                }
-                out << row;
-                emitted += row.size();
-            }
-            std::string result = out.str();
-            if (truncated) {
-                result += "... [truncated at " + std::to_string(kMaxViewBytes) +
-                          " bytes; use view_range to see more]\n";
-            }
-            return result;
-        }
-
-        if (command == "create") {
-            if (!in.contains("path")) return "ERROR: 'path' not present.";
-            if (!in.contains("file_text")) return "ERROR: 'file_text' required for create command.";
-            fs::path path;
-            {
-                std::string sandbox_err;
-                if (!resolve_for_editor(in["path"].get<std::string>(), path, sandbox_err)) {
-                    return sandbox_err;
-                }
-            }
-            std::error_code ec;
-            if (fs::exists(path, ec)) {
-                return "ERROR: File already exists: " + path.string() +
-                       ". Use str_replace to edit part of it, or the 'write' command "
-                       "to replace the whole file.";
-            }
-            if (!write_file(path, in["file_text"].get<std::string>())) {
-                return "ERROR: Failed to write " + path.string();
-            }
-            return "OK";
-        }
-
-        if (command == "write") {
-            // Full overwrite, for the "rewrite this whole file" intent that
-            // str_replace (needs a unique old_str) and create (refuses existing
-            // files) can't express. file_text is the entire new content.
-            if (!in.contains("path")) return "ERROR: 'path' not present.";
-            if (!in.contains("file_text"))
-                return "ERROR: 'file_text' required for the write command.";
-            const std::string input = in["path"].get<std::string>();
-            fs::path path;
-            {
-                std::string sandbox_err;
-                if (!resolve_for_editor(input, path, sandbox_err)) {
-                    return sandbox_err;
-                }
-            }
-            // The mirror of create's "already exists": write is for a file
-            // that is there. Letting it create one would turn a mistyped path
-            // into a quiet new file beside the one the model meant to rewrite.
-            std::error_code ec;
-            if (!fs::exists(path, ec)) {
-                return "ERROR: Not found: " + path.string() +
-                       ". write replaces an existing file; use 'create' for a new one.";
-            }
-            if (fs::is_directory(path, ec)) {
-                return "ERROR: '" + path.string() + "' is a directory.";
-            }
-            if (!write_file(path, in["file_text"].get<std::string>())) {
-                return "ERROR: Failed to write " + path.string();
-            }
-            // Echo the path as the model gave it, as the other commands' errors
-            // do not: the resolved one is absolute and machine-specific.
-            return "OK: wrote " + input;
-        }
-
-        if (command == "delete") {
-            // Remove a single file. The sandbox, the .git guard, and
-            // read-only-grant refusal all come from the editor's resolver, so a
-            // delete is exactly as reachable (and as protected) as a write.
-            // Directories are refused: there is no recursive delete, so a
-            // mis-targeted path can never take a tree (or a repo) with it.
-            if (!in.contains("path")) return "ERROR: 'path' not present.";
-            const std::string input = in["path"].get<std::string>();
-            fs::path path;
-            {
-                std::string sandbox_err;
-                if (!resolve_for_editor(input, path, sandbox_err)) {
-                    return sandbox_err;
-                }
-            }
-            std::error_code ec;
-            if (!fs::exists(path, ec))
-                return "ERROR: Not found: " + path.string() + " (nothing to delete).";
-            if (fs::is_directory(path, ec))
-                return "ERROR: '" + path.string() + "' is a directory. "
-                       "delete removes a single file only; there is no recursive delete. "
-                       "Delete the files inside it one at a time instead.";
-            if (!fs::remove(path, ec))
-                return "ERROR: Failed to delete " + path.string() +
-                       (ec ? (": " + ec.message()) : std::string());
-            return "OK: deleted " + input;
-        }
-
-        if (command == "str_replace") {
-            if (!in.contains("path")) return "ERROR: 'path' not present.";
-            if (!in.contains("old_str")) {
-                return "ERROR: str_replace requires 'old_str'. To delete the matched text, pass new_str=\"\".";
-            }
-            // To delete matched text the model must say so with an explicit
-            // new_str:"" — a missing new_str is how a whole-file write sent as
-            // file_text used to silently become a deletion of old_str.
-            if (!in.contains("new_str")) {
-                return "ERROR: str_replace requires 'new_str' (the replacement text). "
-                       "Pass new_str=\"\" to delete the matched text. If you meant to "
-                       "write a whole file, use the 'write' command with 'file_text'.";
-            }
-            fs::path path;
-            {
-                std::string sandbox_err;
-                if (!resolve_for_editor(in["path"].get<std::string>(), path, sandbox_err)) {
-                    return sandbox_err;
-                }
-            }
-            std::string content;
-            if (!read_file(path, content)) {
-                return "ERROR: File not found: " + path.string() + ". Use the create command to create it.";
-            }
-            std::string old_str = in["old_str"].get<std::string>();
-            std::string new_str = in.value("new_str", "");
-            if (old_str.empty()) {
-                return "ERROR: old_str cannot be empty. Use 'insert' to add new content.";
-            }
-
-            // Matching compares line endings as line endings throughout, not
-            // just as a fallback when the byte-exact search misses. old_str is
-            // composed from `view` output, which strips CR, so on a Windows file
-            // a byte-exact search would miss every multi-line old_str — and,
-            // just as important, two places that differ only in their endings
-            // are indistinguishable to the model that asked for "the unique
-            // occurrence", so both have to count towards ambiguity.
-            const auto hits = find_all_loose(content, old_str);
-            if (hits.empty()) return "ERROR: String not found: " + old_str;
-            if (hits.size() > 1) {
-                return "ERROR: Multiple occurrences found (" + std::to_string(hits.size()) +
-                       "). Please provide a unique string.";
-            }
-            const size_t begin = hits[0].first;
-            const size_t end = hits[0].second;
-
-            // Write the replacement in whatever ending the text it replaces
-            // used, so an edit inside a CRLF file — or inside the CRLF half of a
-            // mixed one — doesn't leave an LF line behind it.
-            const std::string style =
-                eol_style(content.substr(begin, end - begin), eol_style(content, "\n"));
-            content.replace(begin, end - begin, with_eol(new_str, style));
-            if (!write_file(path, content)) return "ERROR: Failed to write " + path.string();
-            return "OK";
-        }
-
-        if (command == "insert") {
-            if (!in.contains("path")) return "ERROR: 'path' not present.";
-            if (!in.contains("insert_line") || !in.contains("new_str")) {
-                return "ERROR: insert_line and new_str required.";
-            }
-            fs::path path;
-            {
-                std::string sandbox_err;
-                if (!resolve_for_editor(in["path"].get<std::string>(), path, sandbox_err)) {
-                    return sandbox_err;
-                }
-            }
-            std::string content;
-            if (!read_file(path, content)) return "ERROR: Failed to read " + path.string();
-
-            int insert_line = in["insert_line"];
-            std::string new_str = in["new_str"].get<std::string>();
-            auto lines = split_lines(content);
-            if (insert_line < 0 || insert_line > static_cast<int>(lines.size())) {
-                return "ERROR: Invalid insert_line";
-            }
-
-            // Splice at a byte offset rather than rebuilding the file from split
-            // lines: rebuilding rejoins with one ending and so rewrites every
-            // line in the file, which turns a one-line insert into a whole-file
-            // diff and normalises a mixed file.
-            const std::string eol = eol_style(content, "\n");
-            const size_t offset = line_start_offset(content, insert_line);
-            const std::string piece = with_eol(new_str, eol);
-            if (offset == content.size() && !content.empty() && content.back() != '\n') {
-                // Appending to a file that doesn't end in a newline: start a new
-                // line for the insert, and leave the file without one as before.
-                content += eol + piece;
-            } else {
-                content.insert(offset, piece + eol);
-            }
-            if (!write_file(path, content)) return "ERROR: Failed to write " + path.string();
-            return "Insertion successful at line " + std::to_string(insert_line);
-        }
-
-        return "ERROR: Unknown command: " + command;
-    } catch (const std::exception& e) {
-        return std::string("ERROR: text editor failed: ") + e.what();
-    }
-}
-
-// --- file search tool -----------------------------------------------------
-// Content search goes through find_matching_lines (tapto/fstools.h), which
-// streams the file so it can reach files far larger than the context window.
-
-std::string execute_find_files(Context& /*context*/, const json& in) {
-    try {
-        if (!in.contains("filename")) return "ERROR: 'filename' not present.";
-        std::string pattern = in["filename"].get<std::string>();
-        std::string start = in.value("path", std::string("."));
-
-        std::string query;
-        bool has_query = in.contains("search_string") &&
-                         in["search_string"].is_string() &&
-                         !in["search_string"].get<std::string>().empty();
-        if (has_query) query = in["search_string"].get<std::string>();
-
-        fs::path base;
-        {
-            std::string sandbox_err;
-            if (!resolve_in_sandbox(start, base, sandbox_err)) return sandbox_err;
-        }
-        std::error_code ec;
-        if (!fs::exists(base, ec)) return "ERROR: Path not found: " + start;
-
-        constexpr size_t kMaxFiles = 100;
-        constexpr size_t kMaxLinesPerFile = 20;
-
-        struct Match {
-            std::string path;
-            std::vector<std::pair<int, std::string>> lines;
-        };
-        std::vector<Match> results;
-
-        fs::recursive_directory_iterator it(base, fs::directory_options::skip_permission_denied, ec), end;
-        for (; it != end && results.size() < kMaxFiles; it.increment(ec)) {
-            if (ec) break;
-            const fs::path& p = it->path();
-            // Never follow symlinks — they could point outside the sandbox.
-            // (Recursive iteration does not descend into directory symlinks by
-            // default; this also skips symlinked files for content grep.)
-            if (it->is_symlink(ec)) continue;
-            if (it->is_directory(ec)) {
-                if (is_noise_dir(p.filename().string())) it.disable_recursion_pending();
-                continue;
-            }
-            if (!it->is_regular_file(ec)) continue;
-            if (!wildcard_match(pattern, p.filename().string())) continue;
-
-            Match m;
-            // Report paths relative to the sandbox root so they match how the
-            // model supplies paths and round-trip back into the other tools.
-            // (The iterator yields absolute paths because `base` is absolute.)
-            // A hit inside a writable granted folder is shown as
-            // "<label>/<rest>", which the editor accepts back.
-            if (granted_owner(p, /*writable_only=*/false) && !is_under(sandbox_root(), p)) {
-                m.path = g_folders->display(p);
-            } else {
-                m.path = p.lexically_relative(sandbox_root()).generic_string();
-            }
-            if (m.path.empty()) m.path = p.generic_string();
-
-            if (has_query) {
-                // Stream the file line-by-line (find_matching_lines) rather than
-                // loading it whole: a content search must reach files far larger
-                // than the context window (the old 5 MiB cap made find_files
-                // report "no files" on any big log). The probe inside bails out
-                // on binaries, and we keep at most kMaxLinesPerFile hits per file.
-                auto lines = find_matching_lines(p, query, kMaxLinesPerFile);
-                if (lines.empty()) continue;   // file name matched, content didn't
-                for (const auto& lm : lines) m.lines.emplace_back(lm.line, std::move(lm.text));
-            }
-
-            results.push_back(std::move(m));
-        }
-
-        if (results.empty()) {
-            if (has_query) {
-                return "No files matching '" + pattern + "' containing '" + query + "'";
-            }
-            return "No files matching '" + pattern + "'";
-        }
-
-        std::ostringstream out;
-        out << "Found " << results.size() << " file(s):\n\n";
-        for (const auto& m : results) {
-            out << m.path << "\n";
-            for (const auto& line : m.lines) {
-                out << "  " << line.first << ": " << line.second << "\n";
-            }
-            if (!m.lines.empty()) out << "\n";
-        }
-        return out.str();
-    } catch (const std::exception& e) {
-        return std::string("ERROR: find_files failed: ") + e.what();
-    }
 }
 
 // --- command tools (allow-listed) -----------------------------------------
@@ -961,9 +229,9 @@ bool process_is_elevated() { return geteuid() == 0; }
 // at the root of a drive, where System32 is inside the sandbox but no more
 // writable than ever.
 bool agent_could_plant(const fs::path& p) {
-    if (!is_within(sandbox_root(), p) && !granted_owner(p, /*writable_only=*/true)) return false;
-    const std::string as_written = p.u8string();
-    if (in_git_dir(p, as_written) || in_tapto_dir(p, as_written)) return false;
+    if (!is_within(sandbox_root(), p) && !rules().owner(p, /*writable_only=*/true)) return false;
+    std::string ignored;
+    if (rules().refuse_protected_write(p, p.u8string(), ignored)) return false;
     return token_can_write(p);
 }
 
@@ -1232,13 +500,13 @@ bool build_argv(const std::string& tpl, const std::vector<std::string>& args,
     // command only reads, so its paths may also be in read-only grants; the
     // protected folders stay refused, since the mark is a promise tapto-code
     // cannot check.
-    const Scope path_scope = reads_only ? Scope::Read : Scope::Write;
+    const PathScope path_scope = reads_only ? PathScope::Read : PathScope::Write;
     auto subst_path = [&](const std::string& value, std::string& out) -> bool {
         fs::path resolved;
         std::string perr;
-        if (!resolve_in_sandbox(value, resolved, perr, base, path_scope)) { error = perr; return false; }
-        const bool program_read = reads_only && in_read_only_program_folder(resolved);
-        if (!program_read && refuse_protected_write(resolved, value, perr)) { error = perr; return false; }
+        if (!rules().resolve(value, resolved, perr, base, path_scope)) { error = perr; return false; }
+        const bool program_read = reads_only && rules().in_read_only_program_folder(resolved);
+        if (!program_read && rules().refuse_protected_write(resolved, value, perr)) { error = perr; return false; }
         out = resolved.string();
         return true;
     };
@@ -1567,7 +835,7 @@ std::string builtin_wc(const std::vector<std::string>& args, const fs::path& bas
     if (file.empty()) return "ERROR: wc: missing file operand";
     fs::path p;
     std::string err;
-    if (!resolve_in_sandbox(file, p, err, base)) return err;
+    if (!rules().resolve(file, p, err, base)) return err;
     std::string content;
     if (!read_file(p, content)) return "ERROR: wc: cannot read " + file;
 
@@ -1627,7 +895,7 @@ std::string builtin_head_tail(bool head, const std::vector<std::string>& args, c
     if (!perr.empty()) return perr + (head ? " (head)" : " (tail)");
     fs::path p;
     std::string err;
-    if (!resolve_in_sandbox(file, p, err, base)) return err;
+    if (!rules().resolve(file, p, err, base)) return err;
     std::string content;
     if (!read_file(p, content)) return "ERROR: cannot read " + file;
     // A binary file has no meaningful lines: dumping raw bytes into the result
@@ -1658,7 +926,7 @@ std::string builtin_cat(const std::vector<std::string>& args, const fs::path& ba
     if (file.empty()) return "ERROR: cat: missing file operand";
     fs::path p;
     std::string err;
-    if (!resolve_in_sandbox(file, p, err, base)) return err;
+    if (!rules().resolve(file, p, err, base)) return err;
     std::error_code ec;
     if (fs::is_directory(p, ec)) return "ERROR: cat: " + file + " is a directory";
     std::string content;
@@ -1684,7 +952,7 @@ std::string builtin_ls(const std::vector<std::string>& args, const fs::path& bas
     }
     fs::path p;
     std::string err;
-    if (!resolve_in_sandbox(path, p, err, base)) return err;
+    if (!rules().resolve(path, p, err, base)) return err;
     std::error_code ec;
     if (!fs::exists(p, ec)) return "ERROR: ls: path not found: " + path;
     if (!fs::is_directory(p, ec)) return p.filename().string() + "\n"; // a plain file
@@ -1761,7 +1029,7 @@ std::string builtin_tree(const std::vector<std::string>& args, const fs::path& b
     if (!have_path) path = ".";
     fs::path p;
     std::string err;
-    if (!resolve_in_sandbox(path, p, err, base)) return err;
+    if (!rules().resolve(path, p, err, base)) return err;
     std::error_code ec;
     if (!fs::exists(p, ec)) return "ERROR: tree: path not found: " + path;
     if (!fs::is_directory(p, ec)) return path + "\n";
@@ -1870,16 +1138,16 @@ std::string execute_run_command(Context& /*context*/, const json& in) {
             if (!in["cwd"].is_string()) return "ERROR: 'cwd' must be a string.";
             const std::string raw = in["cwd"].get<std::string>();
             std::string err;
-            const Scope scope = reads_only ? Scope::Read : Scope::Write;
-            if (!resolve_in_sandbox(raw, base, err, fs::path(), scope)) return err;
+            const PathScope scope = reads_only ? PathScope::Read : PathScope::Write;
+            if (!rules().resolve(raw, base, err, fs::path(), scope)) return err;
             // A built-in only reads, so it may look inside a git directory or
             // tapto-code's own folders. Any other command run there could
             // write whatever it likes: a [ro] one too, since its mark is a
             // promise tapto-code cannot check. The exception is tapto-code's
             // own read-only folders (@tmp), which hold nothing a write there
             // could turn into more access.
-            const bool program_read = reads_only && in_read_only_program_folder(base);
-            if (!builtin && !program_read && refuse_protected_write(base, raw, err)) return err;
+            const bool program_read = reads_only && rules().in_read_only_program_folder(base);
+            if (!builtin && !program_read && rules().refuse_protected_write(base, raw, err)) return err;
             std::error_code ec;
             if (!fs::is_directory(base, ec)) {
                 return "ERROR: cwd '" + raw + "' is not an existing directory. "
@@ -1948,78 +1216,13 @@ std::string execute_run_command(Context& /*context*/, const json& in) {
 // call it through getToolDisplayName() and fall back to the raw name if it
 // throws or is unset.
 //
-// str_replace_based_edit_tool:
-//   view (file, range)        -> "View src/foo.cpp:10-50"
-//   view (file)               -> "View src/foo.cpp"
-//   create                    -> "Create src/foo.cpp"
-//   write                     -> "Write src/foo.cpp"
-//   delete                    -> "Delete src/foo.cpp"
-//   str_replace               -> "Edit src/foo.cpp"
-//   insert                    -> "Insert src/foo.cpp"
-//   unknown sub-command       -> the path
-//
-// find_files:
-//   with search_string        -> "Search *.cpp ~\"query\""
-//   without                   -> "Find *.cpp"
+// (The editor's and find_files' are libtapto's, with the tools.)
 //
 // list_commands               -> "List commands"
 //
 // run_command:
 //   with args                 -> "Run build arg1 arg2"
 //   without args              -> "Run build"
-
-std::string display_text_editor(const json& input) {
-    if (!input.is_object()) return "str_replace_based_edit_tool";
-    std::string cmd  = input.contains("command") && input["command"].is_string()
-                       ? input["command"].get<std::string>() : "";
-    std::string path = input.contains("path") && input["path"].is_string()
-                       ? input["path"].get<std::string>() : "";
-
-    if (cmd == "view") {
-        std::string label = "View " + path;
-        // view_range: show line numbers when present
-        if (input.contains("view_range")) {
-            const auto& vr = input["view_range"];
-            // Accept both a JSON array and a string-encoded array.
-            auto try_range = [&](const json& r) -> std::string {
-                if (r.is_array() && r.size() == 2 &&
-                    r[0].is_number_integer() && r[1].is_number_integer()) {
-                    int end = r[1].get<int>();
-                    return ":" + std::to_string(r[0].get<int>()) +
-                           "-" + (end < 0 ? "EOF" : std::to_string(end));
-                }
-                return "";
-            };
-            if (vr.is_string()) {
-                try {
-                    label += try_range(json::parse(vr.get<std::string>()));
-                } catch (...) {}
-            } else {
-                label += try_range(vr);
-            }
-        }
-        return label;
-    }
-    if (cmd == "create")      return "Create " + path;
-    if (cmd == "write")       return "Write "  + path;
-    if (cmd == "delete")      return "Delete " + path;
-    if (cmd == "str_replace") return "Edit "   + path;
-    if (cmd == "insert")      return "Insert " + path;
-    // Unknown sub-command: fall back to path only.
-    return path.empty() ? "str_replace_based_edit_tool" : path;
-}
-
-std::string display_find_files(const json& input) {
-    if (!input.is_object()) return "find_files";
-    std::string pattern = input.contains("filename") && input["filename"].is_string()
-                          ? input["filename"].get<std::string>() : "*";
-    bool has_query = input.contains("search_string") &&
-                     input["search_string"].is_string() &&
-                     !input["search_string"].get<std::string>().empty();
-    if (has_query)
-        return "Search " + pattern + " ~\"" + input["search_string"].get<std::string>() + "\"";
-    return "Find " + pattern;
-}
 
 std::string display_list_commands(const json&) {
     return "List commands";
@@ -2053,89 +1256,25 @@ void set_granted_folders(const FolderSet* folders) {
 
 bool resolve_plugin_path(const std::string& input, bool write, fs::path& out,
                          std::string& display, std::string& error) {
-    if (write) {
-        // A command's %p rules: rw grants, and refuse_protected_write without
-        // the editor's @memory exception.
-        if (!resolve_in_sandbox(input, out, error, fs::path(), Scope::Write)) return false;
-        if (refuse_protected_write(out, input, error)) return false;
-    } else if (!resolve_for_read(input, out, error)) {
-        return false;
-    }
-    display = input;
-    if (g_folders && !is_under(sandbox_root(), out) && g_folders->owner(out))
-        display = g_folders->display(out);
-    return true;
+    return rules().resolve_plugin_path(input, write, out, display, error);
 }
 
 std::vector<ToolSpec> builtin_tools() {
     std::vector<ToolSpec> tools;
 
-    // str_replace text editor. Declared as Claude's built-in for Anthropic,
-    // and with an explicit schema for OpenAI/Gemini.
-    ToolSpec editor;
-    editor.name = "str_replace_based_edit_tool";
-    editor.description =
-        "View, create, and edit files on the local filesystem. Commands:\n"
-        "- view: show a file (with line numbers) or list a directory. Optional view_range [start,end].\n"
-        "- create: create a new file with file_text (fails if it already exists).\n"
-        "- write: overwrite an entire existing file with file_text (use for full rewrites).\n"
-        "- delete: remove a single file (directories are not deleted).\n"
-        "- str_replace: replace the unique occurrence of old_str with new_str.\n"
-        "- insert: insert new_str after line insert_line (0 = beginning).\n"
-        "file_text is the content field for create and write only; str_replace and "
-        "insert take their text in new_str.\n"
-        "Beyond the working directory, this tool reaches the folders the user "
-        "granted and tapto-code's own folders, named with an '@' label: @tmp (long "
-        "tool output, read-only) and a plugin's folder, @<plugin>, when it has one. "
-        "Address a file in one as <label>/<path>, e.g. @tmp/<file>.";
-    editor.claude_builtin_type = "text_editor_20250728";
-    editor.parameters = {
-        {"type", "object"},
-        {"properties", {
-            {"command", {
-                {"type", "string"},
-                {"enum", {"view", "create", "write", "delete", "str_replace", "insert"}},
-                {"description", "The edit command to run."}
-            }},
-            {"path", {{"type", "string"}, {"description", "File or directory path."}}},
-            {"file_text", {{"type", "string"},
-                           {"description", "Full content for the create and write commands. "
-                                           "NOT used by str_replace or insert."}}},
-            {"old_str", {{"type", "string"}, {"description", "Text to replace (str_replace); must be unique."}}},
-            {"new_str", {{"type", "string"},
-                         {"description", "Replacement text (str_replace) or inserted text (insert). "
-                                          "Required for both; pass an empty string to delete in str_replace."}}},
-            {"insert_line", {{"type", "integer"}, {"description", "Line number to insert after (insert)."}}},
-            {"view_range", {
-                {"type", "array"},
-                {"items", {{"type", "integer"}}},
-                {"description", "Optional [start, end] line range for view (1-based; end -1 = EOF)."}
-            }},
-        }},
-        {"required", {"command", "path"}},
-    };
-    editor.executor = execute_text_editor;
-    editor.display = display_text_editor;
-    tools.push_back(std::move(editor));
-
-    // File search (find + optional content grep).
-    ToolSpec find;
-    find.name = "find_files";
-    find.description =
-        "Find files under a directory by filename pattern, optionally grepping their contents. "
-        "Supports wildcards: * (any sequence) and ? (single character).";
-    find.parameters = {
-        {"type", "object"},
-        {"properties", {
-            {"filename", {{"type", "string"}, {"description", "Filename pattern, e.g. '*.cpp', 'test?.txt'."}}},
-            {"path", {{"type", "string"}, {"description", "Starting directory. Defaults to '.'."}}},
-            {"search_string", {{"type", "string"}, {"description", "Optional text to search for inside matching files."}}},
-        }},
-        {"required", {"filename"}},
-    };
-    find.executor = execute_find_files;
-    find.display = display_find_files;
-    tools.push_back(std::move(find));
+    // The editor and find_files are the library's, over the granted folders.
+    // The set can change after the tools are made (main grants a folder, the
+    // tests set one), and the rules must see the one in force, as they did
+    // when they lived here: each call goes to the tool built for it.
+    for (ToolSpec t : editor_tools(folder_set())) {
+        t.executor = [name = t.name](Context& ctx, const json& in) -> std::string {
+            for (const ToolSpec& now : editor_tools(folder_set())) {
+                if (now.name == name) return now.executor(ctx, in);
+            }
+            return "ERROR: no tool " + name;
+        };
+        tools.push_back(std::move(t));
+    }
 
     // list_commands: lets the model discover the allow-listed commands.
     ToolSpec list_cmds;

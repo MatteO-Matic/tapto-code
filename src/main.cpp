@@ -2,6 +2,8 @@
 // Copyright 2026 Centlake Software AB
 
 #include "tapto/commands.h"
+#include "tapto/chat_commands.h"
+#include "tapto/program.h"
 #include "tapto/config.h"
 #include "tapto/fstools.h"
 #include "tapto/overflow.h"
@@ -229,7 +231,9 @@ const char* kSupportedKeysHelp =
     "connection-timeout, read-timeout, plugin.<name> (ro, rw or off), "
     "per provider <name>-provider-type, <name>-provider-url, <name>-model, "
     "<name>-api-key, <name>-reasoning-effort, "
-    "and the keys of an installed plugin, <plugin>-... (jira-url, jira-api-token, ...)";
+    "and the keys of an installed plugin, <plugin>-... (jira-url, jira-api-token, ...); "
+    "any of them for one program alone after its name: tapto-code.print-cot, "
+    "tapto-word.plugin.mcp, ...";
 
 // True for the unscoped api-key and for any provider block's own key, so both
 // are masked when listed and both warn about plaintext storage when written.
@@ -242,11 +246,14 @@ int cmd_set(const Args& a) {
         ui::print_error("'set' requires <key> <value>");
         return 2;
     }
+    // A key may be one program's ("tapto-word.print-cot"): what follows the
+    // program's name is checked like any key.
+    const std::string base_key = split_program_key(a.positional[1]);
     // A key tapto-code does not know may be an installed plugin's.
     std::optional<PluginConfigKey> plugin_key;
-    if (!is_supported_config_key(a.positional[1])) {
+    if (!is_supported_config_key(base_key)) {
         std::string why;
-        plugin_key = plugin_config_key(a.positional[1], why);
+        plugin_key = plugin_config_key(base_key, why);
         if (!plugin_key) {
             ui::print_error("unknown config key '" + a.positional[1] + "'" +
                             (why.empty() ? std::string() : " (" + why + ")") +
@@ -257,7 +264,7 @@ int cmd_set(const Args& a) {
     // plugin.<name>: a mode, and for one that loads, a plugin that is there
     // and that the policy lets the user load. "off" may name any plugin, so a
     // project can turn off one the user's own config loads.
-    if (const std::string name = plugin_of_key(a.positional[1]); !name.empty()) {
+    if (const std::string name = plugin_of_key(base_key); !name.empty()) {
         const auto mode = parse_plugin_mode(a.positional[2]);
         if (!mode) {
             ui::print_error(a.positional[1] + " takes ro, rw or off, not '" + a.positional[2] +
@@ -602,29 +609,6 @@ std::string unquote(std::string s) {
     return s;
 }
 
-// What /list-folders prints, and what the other folder commands append.
-// The working directory leads the list: it is where tapto-code was started,
-// which is easy to forget, and the model always reaches it.
-std::string list_folders_text(const FolderSet& folders) {
-    if (folders.empty()) {
-        return "No folders are granted. Grant one with /add-folder <path> [ro|rw].";
-    }
-    std::ostringstream out;
-    out << "The model can reach these folders:\n";
-    for (const auto& f : folders.folders()) {
-        out << "  " << f.label << "  ->  " << f.root.generic_string()
-            << (f.home     ? std::string("  (working directory, read-write)")
-                : f.system ? "  (tapto-code's: " + f.note + (f.writable ? ", read-write)" : ", read-only)")
-                : f.writable ? std::string("  (read-write)") : std::string("  (read-only)"))
-            << "\n";
-    }
-    if (!folders.has_grants()) {
-        out << "No other folders are granted. Grant one with /add-folder <path> [ro|rw].";
-    }
-    std::string s = out.str();
-    if (!s.empty() && s.back() == '\n') s.pop_back();
-    return s;
-}
 
 // Write a key to the global (user) config scope.
 // /list-plugins: what is loaded, in what mode, and what else is installed.
@@ -1672,6 +1656,24 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
             save_warned = true;
         }
     };
+    // The commands every tapto program has (tapto/chat_commands.h): /cot,
+    // /effort, /clear, /compact and the folders. tapto-code keeps a cleared
+    // conversation for /resume, saves the conversation when it changes, and
+    // rebuilds the tools when the folders do.
+    ChatCommands chat_commands;
+    chat_commands.ai = &ai_config;
+    chat_commands.client = client.get();
+    chat_commands.folders = &folders;
+    chat_commands.provider_name = provider->name;
+    chat_commands.provider_dialect = provider->dialect;
+    chat_commands.before_clear = [&]() -> std::string {
+        saved = snapshot();
+        return "; /resume brings it back";
+    };
+    chat_commands.history_changed = [&]() { persist(); };
+    chat_commands.folders_changed = [&]() { rebuild_tools_and_prompt(); };
+    chat_commands.progress = [](const std::string& text) { ui::print_line(text); };
+
     auto message_count = [](const nlohmann::json& history) {
         return std::to_string(history.size()) + (history.size() == 1 ? " message" : " messages");
     };
@@ -1773,219 +1775,9 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
         // Reset the conversation (e.g. to recover after filling the context window).
         // The cleared conversation is kept for /resume, and stays in the file
         // until the next turn replaces it, so --resume undoes a /clear too.
-        if (line == "/clear") {
-            if (!client->hasHistory()) {
-                ui::print_line("(conversation cleared)");
-                continue;
-            }
-            saved = snapshot();
-            client->start();
-            ui::print_line("(conversation cleared; /resume brings it back)");
-            continue;
-        }
-
-        // Toggle CoT (chain-of-thought / intermediate reasoning) output.
-        //   /cot            show the current state
-        //   /cot on|off     set the preference and persist it to the global config
-        // The guard matches "/cot" exactly or "/cot" followed by whitespace, so
-        // an unrelated word like "/cotton" falls through to the model as usual.
-        if (line.rfind("/cot", 0) == 0 && (line.size() == 4 || line[4] == ' ' || line[4] == '\t')) {
-            std::istringstream cotiss(line);
-            std::string cotword, cotarg;
-            cotiss >> cotword;
-            std::getline(cotiss, cotarg);
-            size_t cotfirst = cotarg.find_first_not_of(" \t");
-            cotarg = (cotfirst == std::string::npos) ? std::string() : cotarg.substr(cotfirst);
-            std::transform(cotarg.begin(), cotarg.end(), cotarg.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-
-            // No argument: report the current state instead of changing it.
-            if (cotarg.empty()) {
-                ui::print_line("CoT output: " + std::string(ai_config.printCot() ? "on" : "off"));
-                continue;
-            }
-
-            const bool want_on  = (cotarg == "on"  || cotarg == "true"  || cotarg == "1"  || cotarg == "yes");
-            const bool want_off = (cotarg == "off" || cotarg == "false" || cotarg == "0"  || cotarg == "no");
-            if (!want_on && !want_off) {
-                ui::print_line("usage: /cot on|off   (or just /cot to show the current state)");
-                continue;
-            }
-
-            // Apply immediately for this session, then persist so the choice
-            // survives restart. The in-session flag always wins; the write is
-            // best-effort so a full session-level override never blocks.
-            ai_config.setPrintCot(want_on);
-            if (set_global("print-cot", want_on ? "true" : "false")) {
-                ui::print_line("CoT output " + std::string(want_on ? "on" : "off") +
-                               " (saved to " + config_path(Level::Global).string() + ")");
-            } else {
-                ui::print_line("CoT output " + std::string(want_on ? "on" : "off") +
-                               " for this session (could not be saved to global config)");
-            }
-            continue;
-        }
-
-        // Set the OpenAI reasoning-effort hint for the current provider. The
-        // value is passed through unvalidated: which tokens an endpoint accepts
-        // is the endpoint's business (OpenAI: low/medium/high; gpt-5: minimal,
-        // low, medium, high; local adapters: whatever they document).
-        //   /effort             show the current state
-        //   /effort <value>     apply in-session and persist to <name>-reasoning-effort
-        //   /effort off         clear the value (server picks its own default)
-        // The guard matches "/effort" exactly or "/effort" followed by whitespace,
-        // so an unrelated word like "/effortless" still goes to the model.
-        // Persists to the local scope (per-project), matching /add-command and
-        // letting each project choose how hard the model thinks.
-        if (line.rfind("/effort", 0) == 0 &&
-            (line.size() == 7 || line[7] == ' ' || line[7] == '\t')) {
-            std::istringstream efiss(line);
-            std::string efword, efarg;
-            efiss >> efword;
-            std::getline(efiss, efarg);
-            size_t efirst = efarg.find_first_not_of(" \t");
-            efarg = (efirst == std::string::npos) ? std::string() : efarg.substr(efirst);
-            std::transform(efarg.begin(), efarg.end(), efarg.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-
-            const std::string key = provider->name + "-reasoning-effort";
-
-            // No argument: report the current in-session state.
-            if (efarg.empty()) {
-                const std::string cur = ai_config.openaiReasoningEffort();
-                ui::print_line(key + " = " +
-                               (cur.empty() ? std::string("(unset — server picks its default)") : cur));
-                continue;
-            }
-
-            // Off aliases clear the value so the request omits the field and
-            // the server uses its own default. Accept a few natural synonyms.
-            const bool is_off = (efarg == "off"     || efarg == "none"    ||
-                                 efarg == "clear"   || efarg == "reset"   ||
-                                 efarg == "default" || efarg == "auto"    ||
-                                 efarg == "unset"   || efarg == "inherit" ||
-                                 efarg == "-");
-
-            if (is_off) {
-                // Apply in-session immediately, then try to unset the local key.
-                ai_config.setOpenaiReasoningEffort("");
-                try {
-                    auto path = config_path(Level::Local);
-                    Config cfg = Config::load(path);
-                    if (cfg.unset(key)) {
-                        cfg.save(path);
-                        ui::print_line("reasoning-effort cleared (removed " + key +
-                                       " from " + path.string() + ")");
-                    } else {
-                        ui::print_line("reasoning-effort cleared for this session");
-                    }
-                } catch (const std::exception& e) {
-                    ui::print_line(std::string("reasoning-effort cleared for this session (") +
-                                   e.what() + ")");
-                }
-                continue;
-            }
-
-            // A value is settable only for the openai dialect — the other two
-            // backends never send the field, so accepting the value here would
-            // make it look like it took effect when it did not.
-            if (provider->dialect != "openai") {
-                ui::print_error("/effort only applies to the openai dialect; '" +
-                                provider->name + "' speaks " + provider->dialect);
-                continue;
-            }
-
-            // Apply in-session, then persist to the local config.
-            ai_config.setOpenaiReasoningEffort(efarg);
-            const std::string path_str = config_path(Level::Local).string();
-            try {
-                auto path = config_path(Level::Local);
-                Config cfg = Config::load(path);
-                cfg.set(key, efarg);
-                cfg.save(path);
-                ui::print_line(key + " = " + efarg + " (saved to " + path_str + ")");
-            } catch (const std::exception& e) {
-                ui::print_line(key + " = " + efarg +
-                               " for this session (could not save: " + e.what() + ")");
-            }
-            continue;
-        }
-
-        // Compact the conversation: ask the model to summarize the discussion
-        // so far, then restart from that summary. Optional focus hint:
-        //   /compact keep the CMake changes in mind
-        if (line.rfind("/compact", 0) == 0) {
-            if (!client->hasHistory()) {
-                ui::print_line("(nothing to compact — the conversation is empty)");
-                continue;
-            }
-            std::istringstream ciss(line);
-            std::string ccmd, focus;
-            ciss >> ccmd;
-            std::getline(ciss, focus);
-            size_t cfirst = focus.find_first_not_of(" \t");
-            focus = (cfirst == std::string::npos) ? std::string() : focus.substr(cfirst);
-
-            // Tool-free context so the model summarizes instead of editing files.
-            Context summarize_ctx;
-            std::string prompt =
-                "Summarize the entire conversation so far as a compact, structured note: "
-                "the user's goals, decisions made, files read or modified, and the current "
-                "state of any in-progress task. Reply with the summary only. " +
-                (focus.empty() ? std::string() : "Emphasize: " + focus);
-            // Snapshot the current conversation so a failed or empty
-            // summarization can be rolled back instead of throwing the session
-            // away: compaction must never leave you with "nothing."
-            auto before = client->getHistory();
-            // Feed the summarizer a trimmed view of the conversation — large
-            // tool-result / file payloads swapped for short placeholders — so
-            // this (the biggest request of the session) stays small and keeps
-            // output-token headroom on providers that share one window for
-            // input + output (vLLM, Ollama, LM Studio, ...). The live history
-            // is untouched: a success replaces it with the summary (see
-            // beginWithSummary below) and a failure restores `before` in the
-            // catch block, so we never persist the trimmed copy either way.
-            auto trimmed = client->buildTrimmedHistoryForSummary();
-            client->loadHistory(trimmed);
-            mclog("[/compact] summarization input: " + std::to_string(before.dump().size())
-                   + " serialized bytes -> " + std::to_string(trimmed.dump().size())
-                   + " after trimming");
-            std::string summary;
-            try {
-                ui::print_line("(summarizing conversation…)");
-                summary = client->chat(summarize_ctx, prompt);
-            } catch (const std::exception& e) {
-                // Restore the untouched conversation — the summarize request was
-                // made in-turn, so a failure may have appended stray messages.
-                client->loadHistory(before);
-                mclog(std::string("[/compact] FAILED: ") + e.what() + "\n");
-                ui::print_error(std::string("compaction failed: ") + e.what());
-                continue;
-            }
-            // Dump the raw model output to the trace file (when one is set) so
-            // the exact summary — empty or not — can be inspected while
-            // debugging the next couple of runs.
-            mclog("[/compact] raw summary (" + std::to_string(summary.size()) + " bytes):\n"
-                   + summary + "\n[/compact] --- end of raw summary ---\n");
-            // Guard against a missing/empty summary. Thinking models (Claude,
-            // Gemini) may return the summary inside their reasoning/thought
-            // blocks, which the text-only reply extraction drops — that would
-            // reseed the conversation with an empty note and the model would
-            // "know" nothing of the previous session. Never discard a real
-            // session for an empty summary: keep what we had and say so.
-            {
-                size_t first = summary.find_first_not_of(" \t\r\n");
-                if (first == std::string::npos) {
-                    client->loadHistory(before);
-                    mclog("[/compact] empty summary — original conversation kept\n");
-                    ui::print_error("compaction produced no summary — conversation kept as is.");
-                    continue;
-                }
-            }
-            client->beginWithSummary(summary);
-            persist();
-            mclog("[/compact] reseeded the conversation with a " + std::to_string(summary.size()) + "-byte summary\n");
-            ui::print_line("(conversation compacted)");
+        if (auto r = run_chat_command(line, chat_commands)) {
+            if (r->error) ui::print_error(r->text);
+            else ui::print_line(r->text);
             continue;
         }
 
@@ -2061,103 +1853,6 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
         // and nothing more. The labels the model addresses them by are shown
         // on grant and by /list-folders. Same commands and wording as
         // tapto-word.
-        if (line == "/list-folders") {
-            ui::print_line(list_folders_text(folders));
-            continue;
-        }
-        if (line.rfind("/add-folder", 0) == 0) {
-            // "/add-folder <path> [ro|rw]": a trailing ro/rw word is the mode,
-            // read-only by default. The path may be quoted, so the mode is
-            // split off first and the rest unquoted as one argument.
-            std::string rest = trim(line.substr(std::string("/add-folder").size()));
-            bool writable = false;
-            {
-                const size_t sp = rest.find_last_of(" \t");
-                if (sp != std::string::npos) {
-                    std::string mode = rest.substr(sp + 1);
-                    std::transform(mode.begin(), mode.end(), mode.begin(),
-                                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                    if (mode == "rw" || mode == "ro") {
-                        writable = (mode == "rw");
-                        rest = rest.substr(0, sp);
-                    }
-                }
-            }
-            const std::string arg = unquote(rest);
-            if (arg.empty()) {
-                ui::print_line("usage: /add-folder <path> [ro|rw]   (read-only unless rw)");
-                continue;
-            }
-            const size_t before = folders.folders().size();
-            std::string label;
-            const std::string err = folders.add(arg, &label, writable);
-            if (!err.empty()) {
-                ui::print_error(err);
-                continue;
-            }
-            if (folders.folders().size() == before) {
-                // Already granted: a repeated grant may still change the mode.
-                // The working directory covers its subfolders and has no
-                // mode to change.
-                const Folder* have = folders.get(label);
-                if (have && have->home) {
-                    ui::print_line("That is covered by the working directory ('" + label + "', " +
-                                   have->root.generic_string() + "), which the model can "
-                                   "always read and write. Nothing to grant.");
-                } else if (have && have->writable != writable) {
-                    folders.set_writable(label, writable);
-                    rebuild_tools_and_prompt();
-                    ui::print_line("'" + label + "' is now " +
-                                   (writable ? "read-write." : "read-only."));
-                } else {
-                    ui::print_line("Already granted, as '" + label + "' (" +
-                                   (have && have->writable ? "read-write" : "read-only") + ").");
-                }
-                continue;
-            }
-            rebuild_tools_and_prompt();
-            ui::print_line(std::string("Granted ") + (writable ? "read-write" : "read-only") +
-                           " access to " + arg + " as '" + label + "'. The model can now list, "
-                           "read and search it" +
-                           (writable ? ", and create or edit files under it with the editor tool, "
-                                       "as <label>/<path> or by absolute path. "
-                                     : "; it cannot change anything. ") +
-                           (folders.folders().size() == (folders.home() ? 2u : 1u)
-                                ? std::string("Revoke with /remove-folder ") + label + "."
-                                : "Files are addressed as <label>/<path>; /list-folders "
-                                  "shows the labels."));
-            continue;
-        }
-        if (line.rfind("/remove-folder", 0) == 0) {
-            const std::string arg = unquote(line.substr(std::string("/remove-folder").size()));
-            if (arg.empty()) {
-                ui::print_line("usage: /remove-folder <path or label>\n\n" +
-                               list_folders_text(folders));
-                continue;
-            }
-            if (const Folder* f = folders.get(arg); f && f->home) {
-                ui::print_line("'" + arg + "' is the working directory tapto-code was started "
-                               "in; it cannot be removed or made read-only.");
-                continue;
-            }
-            if (const Folder* f = folders.get(arg); f && f->system) {
-                ui::print_line("'" + f->label + "' is tapto-code's own folder (" + f->note +
-                               "), not a grant; it cannot be removed.");
-                continue;
-            }
-            if (!folders.remove(arg)) {
-                ui::print_line("'" + arg + "' is not a granted folder.\n\n" +
-                               list_folders_text(folders));
-                continue;
-            }
-            rebuild_tools_and_prompt();
-            ui::print_line("Revoked '" + arg + "'. " +
-                           (folders.has_grants()
-                                ? "\n" + list_folders_text(folders)
-                                : std::string("The model reaches only the working directory now.")));
-            continue;
-        }
-
         // Plugins: tools from the modules installed beside tapto-code
         // (tapto/plugins.h), read-only unless rw, worded like the folders.
         if (line == "/list-plugins") {
@@ -2166,16 +1861,23 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
         }
         if (line.rfind("/add-plugin", 0) == 0 &&
             (line.size() == 11 || line[11] == ' ' || line[11] == '\t')) {
-            std::istringstream iss(line.substr(11));
+            // For this session by default; --project or --global also loads
+            // it at every start there (plugin.<name> = ro | rw).
+            const ScopeFlags flags = parse_scope_flags(line.substr(11));
+            std::istringstream iss(flags.rest);
             std::string name, mode, extra;
             iss >> name >> mode >> extra;
             std::transform(mode.begin(), mode.end(), mode.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            if (name.empty() || !(mode.empty() || mode == "ro" || mode == "rw") || !extra.empty()) {
-                ui::print_line("usage: /add-plugin <name> [ro|rw]   (read-only unless rw)\n\n" +
+            if (!flags.error.empty() || name.empty() ||
+                !(mode.empty() || mode == "ro" || mode == "rw") || !extra.empty()) {
+                ui::print_line((flags.error.empty() ? std::string() : flags.error + "\n") +
+                               "usage: /add-plugin <name> [ro|rw] [--project|--global]   "
+                               "(read-only unless rw; this session unless a scope)\n\n" +
                                list_plugins_text(plugins));
                 continue;
             }
+            const SettingScope scope = flags.scope.value_or(SettingScope::Session);
             const bool writable = mode == "rw";
             bool was_loaded = false, was_writable = false;
             for (const auto& e : plugins.loaded()) {
@@ -2188,9 +1890,17 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
                 ui::print_error(why);
                 continue;
             }
+            // Where it loads from now on, when a scope says so.
+            std::string saved_where;
+            if (scope != SettingScope::Session) {
+                const SettingWrite w =
+                    write_setting("plugin." + name, writable ? "rw" : "ro", scope);
+                saved_where = w.ok ? " It loads at every start (" + w.text + ")."
+                                   : " It is not saved: " + w.text + ".";
+            }
             if (was_loaded && was_writable == writable) {
                 ui::print_line("'" + name + "' is loaded already (" +
-                               (writable ? "read-write" : "read-only") + ").");
+                               (writable ? "read-write" : "read-only") + ")." + saved_where);
                 continue;
             }
             rebuild_tools_and_prompt();
@@ -2215,15 +1925,44 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
                            name + " rw offers them.";
                 }
                 if (!was_loaded) msg += " Remove it with /remove-plugin " + name + ".";
-                ui::print_line(msg);
+                ui::print_line(msg + saved_where);
             }
             continue;
         }
         if (line.rfind("/remove-plugin", 0) == 0) {
-            const std::string name = trim(line.substr(std::string("/remove-plugin").size()));
-            if (name.empty()) {
-                ui::print_line("usage: /remove-plugin <name>\n\n" + list_plugins_text(plugins));
+            // For this session by default; --project or --global also stops it
+            // loading at every start there.
+            const ScopeFlags flags =
+                parse_scope_flags(line.substr(std::string("/remove-plugin").size()));
+            const std::string name = flags.rest;
+            if (!flags.error.empty() || name.empty() || name.find_first_of(" \t") != std::string::npos) {
+                ui::print_line((flags.error.empty() ? std::string() : flags.error + "\n") +
+                               "usage: /remove-plugin <name> [--project|--global]\n\n" +
+                               list_plugins_text(plugins));
                 continue;
+            }
+            const SettingScope scope = flags.scope.value_or(SettingScope::Session);
+            std::string saved_where;
+            if (scope != SettingScope::Session) {
+                const std::string key = "plugin." + name;
+                SettingWrite w = write_setting(key, std::nullopt, scope);
+                // Still loaded from a less specific scope: in a project, `off`
+                // there is what undoes it; globally, the reply says where.
+                const auto still = get_effective(key);
+                const bool loads = still && parse_plugin_mode(*still) &&
+                                   *parse_plugin_mode(*still) != PluginMode::Off;
+                if (loads && scope == SettingScope::Project) w = write_setting(key, "off", scope);
+                if (w.ok || !loads) {
+                    saved_where = loads && scope == SettingScope::Global
+                                      ? " It still loads at start: the " + setting_origin(key) +
+                                            " has " + key + " = " + *still + "."
+                                      : " It no longer loads at start from the " +
+                                            std::string(scope == SettingScope::Global
+                                                            ? "global config."
+                                                            : "project config.");
+                } else {
+                    saved_where = " Not changed in the config: " + w.text + ".";
+                }
             }
             // Its tools leave the table before the plugin is shut down.
             std::vector<ToolSpec> kept;
@@ -2234,7 +1973,8 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
             bool unloaded = false;
             if (!plugins.remove(name, &unloaded)) {
                 rebuild_tools_and_prompt();
-                ui::print_line("'" + name + "' is not loaded.\n\n" + list_plugins_text(plugins));
+                ui::print_line("'" + name + "' is not loaded." + saved_where + "\n\n" +
+                               list_plugins_text(plugins));
                 continue;
             }
             rebuild_tools_and_prompt();
@@ -2242,12 +1982,24 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
             ui::print_line("Removed plugin '" + name + "'; its tools are gone." +
                            (unloaded ? std::string()
                                      : std::string(" (Its module stays loaded until tapto-code "
-                                                   "exits.)")));
+                                                   "exits.)")) +
+                           saved_where);
             continue;
         }
 
         if (line.rfind("/add-command", 0) == 0) {
-            std::istringstream iss(line);
+            const ScopeFlags flags = parse_scope_flags(
+                line.substr(std::string("/add-command").size()), /*leading_only=*/true);
+            if (!flags.error.empty() || flags.scope == SettingScope::Session) {
+                ui::print_line(flags.error.empty()
+                                   ? "A command is saved, in the project's list or with --global "
+                                     "in every project's; there is no command for this session "
+                                     "only."
+                                   : flags.error);
+                continue;
+            }
+            const bool global_command = flags.scope == SettingScope::Global;
+            std::istringstream iss("/add-command " + flags.rest);
             std::string slash, name;
             iss >> slash >> name;
             // --ro marks the command [ro]: it only reads (tapto/commands.h).
@@ -2272,7 +2024,8 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
             }
             size_t begin = remainder.find_first_not_of(" \t");
             if (name.empty() || name == "--ro" || begin == std::string::npos) {
-                ui::print_line("usage: /add-command [--ro] <name> <command...> [--note \"...\"]");
+                ui::print_line("usage: /add-command [--global] [--ro] <name> <command...> "
+                               "[--note \"...\"]");
                 continue;
             }
             if (name.find('=') != std::string::npos) {
@@ -2295,8 +2048,8 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
                 continue;
             }
             try {
-                add_command(Level::Local, name, cmdline);
-                ui::print_command_added(name, "local", cmdline);
+                add_command(global_command ? Level::Global : Level::Local, name, cmdline);
+                ui::print_command_added(name, global_command ? "global" : "local", cmdline);
             } catch (const std::exception& e) {
                 ui::print_line("error: " + std::string(e.what()));
             }
@@ -2383,6 +2136,7 @@ int cmd_chat(const std::string& requested_provider, bool resume) {
 } // namespace
 
 int main(int argc, char** argv) {
+    tapto::set_program_name("tapto-code"); // in what the library says
     enable_console_features();
 
     // The `command` subcommand is parsed specially: `command add` takes its

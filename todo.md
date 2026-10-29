@@ -168,30 +168,46 @@ session. Decided:
 
 ## In libtapto
 
-- [ ] **Settings commands** (`tapto/settings_commands.h`, say): the scope
-      flags (anywhere, or before the first word only), each command saying
-      which scopes it takes and its default; set / unset / show at a level
-      with the reply above and the policy note; /cot and /effort on
-      AiConfig. A program says what it calls its scopes (tapto-word's
-      session is the document's conversation), and which program it is, for
-      the `tapto-word.` keys below.
-- [ ] **Conversation commands:** /clear (`start()`) and /compact, moved from
-      tapto-code's main.cpp as it is: the trimmed history for the summary,
-      rolled back on a failure or an empty summary, `beginWithSummary`.
-- [ ] **Folder commands:** /list-folders, /add-folder <path> [ro|rw],
-      /remove-folder; session only.
-- [ ] **The file editor**, out of tapto-code's `src/tools.cpp`: view,
-      create, str_replace, insert, write, and `resolve_for_editor` with its
-      rules (folder mode, `.git` and `~/.tapto` refused). Offered when a rw
-      grant exists. Gives tapto-word, and tapto-vnc, rw folders.
-- [ ] **The plugins:** the loader (`src/plugins.cpp`, `tapto/plugins.h`)
-      and what it leans on in tapto-code: the overflow to `@tmp`
-      (`src/overflow.cpp`) for every result, and the program's own commands
-      and events (before_turn, /<plugin>) dispatched by each host. Images
-      already go through libtapto's `putToolImage`.
-- [ ] One entry point: a program hands a typed line to libtapto first and
-      runs what it does not know itself; every command returns its text,
-      printed the program's way (a terminal, Word's task pane).
+- [x] **Settings commands** (`tapto/chat_commands.h`): `parse_scope_flags`
+      (anywhere, or before the first word only), `write_setting` (to the key
+      that set the value at that scope, refused where the policy sets it),
+      `setting_origin`; /cot (global by default) and /effort (the
+      project's) with `unset` and the show. A program without a project says
+      so (`has_project`), and --project is refused there.
+- [x] **Per-program keys** (`tapto/program.h`: `program_names`,
+      `split_program_key`): `effective_config` applies a program's own key
+      over the shared one within each scope, and leaves another program's
+      out; `EffectiveEntry::program_key`; `is_policy_managed` takes both.
+- [x] **Conversation commands:** /clear (with a hook a program keeps the
+      conversation in: tapto-code's /resume) and /compact, moved as it was.
+- [x] **Folder commands:** /list-folders, /add-folder <path> [ro|rw],
+      /remove-folder; session only, a scope flag refused; `rw_folders` false
+      for a program that grants read-only.
+- [x] **The file editor**, out of tapto-code's `src/tools.cpp` (libtapto
+      `d584ce3`): `tapto/editor.h` (`editor_tools(folders)`, the editor and
+      find_files) over `tapto/pathrules.h` (`PathRules`: the working
+      directory is the set's home root, so a program without one reaches
+      only its folders; `.git` and `~/.tapto` refused; `protect_folder`,
+      `set_read_only_advice` for a program's own). `tapto/program.h` names
+      the program in what the library says. tapto-code keeps its commands
+      on the same rules. A test without a working directory, as tapto-word
+      will run it.
+- [x] **The plugins** (libtapto `f62eba6`): the loader (`tapto/plugins.h`),
+      its folders and `@tmp` per session (`Plugins(&folders)`,
+      `set_temp_folder`); `TempFolder` (`tapto/overflow.h`), one session's
+      `@tmp`, with the old functions on the process's default one; the five
+      plugins in libtapto's `plugins/` with `tapto_plugin()` and the
+      `TAPTO_PLUGINS` list; Configure's `"program"`; test-plugins moved.
+      Each host still dispatches the commands and events (before_turn,
+      /<plugin>).
+      - The installer: its `set_tests_properties(edits config plugins memory
+        DIRECTORY ...)` names tapto-code's directory, and `plugins` is
+        libtapto's test now. Change it when it packages v0.7.0.
+- [x] One entry point: `run_chat_command(line, ChatCommands&)`, nullopt for
+      what the program runs itself; every command returns its text, printed
+      the program's way. `ChatCommands` holds what the program gives (its
+      AiConfig, client, folders, provider) and its hooks (before /clear,
+      after a change to the conversation, after one to the folders).
 
 Stays in each program: tapto-code's /add-command, /resume and /env;
 tapto-word's Word-specific commands; and what a program shows of it.
@@ -300,7 +316,12 @@ Decided 29 Oct.
 
 - [ ] libtapto v0.7.0: the settings, conversation and folder commands, the
       editor and the plugin loader, with tests.
-- [ ] tapto-code takes them: mostly code going away, with the scope flags.
+- [x] tapto-code takes them (uncommitted until the pin moves): its /cot,
+      /effort, /clear, /compact and folder commands go to
+      `run_chat_command`; /add-command takes --global, /add-plugin and
+      /remove-plugin --project and --global (`plugin.<name>`; `off` in a
+      project the global config loads it in); `config set` takes
+      `<program>.<key>`.
 - [ ] tapto-word: v0.1.0 to v0.7.0 first, then the shared commands, rw
       folders and plugins, and its own /cot and /effort go.
 - [ ] tapto-vnc: the same catch-up, then the commands and plugins.

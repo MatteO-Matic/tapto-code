@@ -14,6 +14,7 @@
 // the index. Run with the module's path: test-memory <memory module>.
 
 #include "tapto/context.h"
+#include "tapto/program.h"
 #include "tapto/fstools.h"
 #include "tapto/paths.h"
 #include "tapto/plugins.h"
@@ -113,6 +114,7 @@ bool is_error(const std::string& r) { return r.rfind("ERROR:", 0) == 0; }
 } // namespace
 
 int main(int argc, char** argv) {
+    tapto::set_program_name("tapto-code"); // in what the library says
     if (argc < 2) {
         std::cout << "usage: test-memory <memory module>\n";
         return 2;

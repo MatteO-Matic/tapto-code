@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(tapto-code VERSION 1.2.0 LANGUAGES CXX)
+project(tapto-code VERSION 1.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -85,8 +85,23 @@ set(TAPTO_VERSION_ARGS
 )
 
 # Once at configure time as well, so the header exists before anything asks an
-# IDE or a generator to parse the sources that include it.
-execute_process(COMMAND ${CMAKE_COMMAND} ${TAPTO_VERSION_ARGS})
+# IDE or a generator to parse the sources that include it, and a tag that does
+# not match project() stops the configure.
+#
+# project() holds the next release: raise it right after tagging one, so a
+# build of main is that version's dev build. See cmake/GitVersion.cmake.
+execute_process(COMMAND ${CMAKE_COMMAND} ${TAPTO_VERSION_ARGS} RESULT_VARIABLE _version_result)
+if(NOT _version_result EQUAL 0)
+  message(FATAL_ERROR "the version stamp failed (above)")
+endif()
+# The version this build is, for a packaging project that builds this one as
+# a subdirectory (its file names; an MSI's own version stays project()'s,
+# since Windows takes numbers only there). As of the configure, which is what
+# a release build runs from.
+file(STRINGS "${TAPTO_VERSION_HEADER}" _version_line REGEX "^#define TAPTO_CODE_VERSION ")
+string(REGEX MATCH "\"([^\"]*)\"" _version_quoted "${_version_line}")
+set(TAPTO_CODE_VERSION_FULL "${CMAKE_MATCH_1}")
+message(STATUS "tapto-code ${TAPTO_CODE_VERSION_FULL}")
 
 add_custom_target(tapto_version ALL
   COMMAND ${CMAKE_COMMAND} ${TAPTO_VERSION_ARGS}

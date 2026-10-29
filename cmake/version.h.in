@@ -6,7 +6,9 @@
 
 #pragma once
 
-#define TAPTO_CODE_VERSION "@PROJECT_VERSION@"
+// The version this build is (cmake/GitVersion.cmake): "1.3.0" on a release
+// tag, "1.3.0-rc.1" on a release candidate's, "1.3.0-dev.48+gd5e45db" between.
+#define TAPTO_CODE_VERSION "@TAPTO_VERSION_FULL@"
 
 // What `git describe --always --dirty --tags` said at the moment this was
 // built: a tag if the commit has one, otherwise the nearest tag plus a

@@ -44,6 +44,11 @@ From 1.0.0 the major number carries breaking changes, the minor number new
 features, and the patch number fixes. (Before 1.0.0 the minor number carried
 breaking changes and the patch number everything else.)
 
+A build between releases names the release it leads to: `1.3.0-dev.48+gd5e45db`
+is 48 commits past the last tag, at commit d5e45db. A release candidate is
+`1.3.0-rc.1`, the release itself `1.3.0`. Each sorts before the next, so a
+newer build never looks older than the one it replaces.
+
 ## [Unreleased]
 
 ### Added
@@ -106,6 +111,9 @@ breaking changes and the patch number everything else.)
 
 ### Changed
 
+- `tapto-code version`, the banner and the trace name the release a build
+  leads to: a build of work since 1.2.0 says `1.3.0-dev.<n>+g<commit>`, where
+  it used to say `1.2.0`, and a release candidate says `1.3.0-rc.1`.
 - The model's notes per project are now the memory plugin, and are off until
   you turn them on: `plugin.memory = rw` in the config, or `/add-plugin memory
   rw` in a session (`ro` lets the model read its notes but not change them).

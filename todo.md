@@ -117,6 +117,196 @@ moving the project memory into a plugin is listed there.
 
 ---
 
+# One set of commands, editor and plugins for all three (libtapto v0.7.0)
+
+Discussed 29 Oct. tapto-code, tapto-word and tapto-vnc each grow their own
+slash commands (tapto-word got /cot last version, in its own
+`src/slash.cpp`), and only tapto-code has the file editor and the plugins.
+What all three should have moves into libtapto, once, and each program keeps
+only what is its own.
+
+Where they stand: tapto-code pins libtapto v0.6.0; tapto-word and tapto-vnc
+pin v0.1.0, so each has five versions to catch up before it can take any of
+this. tapto-word has /help, /cot, /effort and the folder commands (read-only
+grants: it has no editor to feed a rw one). tapto-vnc has a chat loop like
+tapto-code's (/resume, start()) and /exit.
+
+## Settings commands and their scope
+
+Today each command picks a scope silently: /cot writes the global config,
+/effort and /add-command the project's, /add-folder and /add-plugin only the
+session. Decided:
+
+| command | default | can also be |
+|---|---|---|
+| `/cot` | global: a preference about how output is shown | `--project`, `--session` |
+| `/effort` | project: it goes with the model the project uses | `--global`, `--session` |
+| `/add-command` | project: the allow-list is the project's | `--global` |
+| `/add-plugin`, `/remove-plugin` | session | `--project`, `--global` |
+| `/add-folder`, `/remove-folder` | session, always | none |
+
+- Not everything per session: a user expects preferences to be remembered.
+- Folders never persist: a grant of file access does not outlive the session
+  it was given in, and a scope flag on /add-folder is refused with the
+  reason. /resume bringing back a session's own folders is that session
+  going on.
+- Flags anywhere for commands of one word (`/cot --global off` = `/cot off
+  --global`); for /add-command only before the name, as `--ro`, since what
+  follows is the command line as written.
+- `unset` takes a scope (`/cot unset --global`) and removes the key there,
+  so a less specific level applies again. A bare `/cot` shows the value in
+  force and where it comes from (the config already knows each value's
+  level).
+- Every reply names the scope ("cot is off (global config)"), and says so
+  when the policy sets the key and the write changes nothing.
+- `/remove-plugin mcp --project` while the global config loads it writes
+  `plugin.mcp = off` to the project's (what `off` is for); `--global` takes
+  the global key away, and the reply says when a project still loads it.
+- /list-plugins already shows the installed ones not loaded; it gains where
+  each loaded one comes from (session, which config, the policy) and which
+  the policy refuses.
+
+## In libtapto
+
+- [ ] **Settings commands** (`tapto/settings_commands.h`, say): the scope
+      flags (anywhere, or before the first word only), each command saying
+      which scopes it takes and its default; set / unset / show at a level
+      with the reply above and the policy note; /cot and /effort on
+      AiConfig. A program says what it calls its scopes (tapto-word's
+      session is the document's conversation), and which program it is, for
+      the `tapto-word.` keys below.
+- [ ] **Conversation commands:** /clear (`start()`) and /compact, moved from
+      tapto-code's main.cpp as it is: the trimmed history for the summary,
+      rolled back on a failure or an empty summary, `beginWithSummary`.
+- [ ] **Folder commands:** /list-folders, /add-folder <path> [ro|rw],
+      /remove-folder; session only.
+- [ ] **The file editor**, out of tapto-code's `src/tools.cpp`: view,
+      create, str_replace, insert, write, and `resolve_for_editor` with its
+      rules (folder mode, `.git` and `~/.tapto` refused). Offered when a rw
+      grant exists. Gives tapto-word, and tapto-vnc, rw folders.
+- [ ] **The plugins:** the loader (`src/plugins.cpp`, `tapto/plugins.h`)
+      and what it leans on in tapto-code: the overflow to `@tmp`
+      (`src/overflow.cpp`) for every result, and the program's own commands
+      and events (before_turn, /<plugin>) dispatched by each host. Images
+      already go through libtapto's `putToolImage`.
+- [ ] One entry point: a program hands a typed line to libtapto first and
+      runs what it does not know itself; every command returns its text,
+      printed the program's way (a terminal, Word's task pane).
+
+Stays in each program: tapto-code's /add-command, /resume and /env;
+tapto-word's Word-specific commands; and what a program shows of it.
+
+## tapto-word and rw folders
+
+What tapto-word works on is documents, often someone else's (a contract, a
+mail), and text in one can try to steer the model. Read-only grants bound
+that to reading; a rw grant lets a document's text ask for files to be
+changed. So: rw only on an explicit `/add-folder <path> rw`, never saved,
+for the document it was given in, and every write the editor makes shown in
+the task pane.
+
+## Settings per program
+
+Decided 29 Oct. The config is shared (`~/.tapto/config`, by all three), and
+a setting may be meant for one program only: `plugin.mcp = rw` would
+otherwise load mcp in every one.
+
+- **A program prefix on the key**, not `[tapto-word]` sections or YAML:
+  ```
+  # all three
+  print-cot = true
+  plugin.image = ro
+
+  # tapto-word only
+  tapto-word.print-cot = false
+  tapto-word.plugin.mcp = rw
+  ```
+  Sections were the first idea, but libtapto's parser skips a `[...]` line
+  as malformed and reads the keys under it as common ones (last occurrence
+  wins), so an older program on the same machine (tapto-word and tapto-vnc
+  are on v0.1.0) would take another's settings silently. A prefixed key is
+  one it does not know, and leaves alone. It also fits the policy, which is
+  key/value pairs (ADMX Additional settings), where a section has no place.
+- The prefixes are a fixed list (`tapto-code.`, `tapto-word.`, `tapto-vnc.`),
+  so `config set` refuses a misspelt one. No clash with a plugin's own
+  `<plugin>-...` keys: a plugin name has no dot.
+- **Resolution: the level first, then the program within it.** Policy over
+  project over global over system as now; inside one level
+  `tapto-word.print-cot` beats `print-cot`. A common key in a project's
+  config still beats a program key in the global one: the more specific
+  level wins.
+- Grouping is by hand, under a comment; `config set` edits in place, so the
+  layout stays.
+- **A settings command writes where the value in force came from:** the
+  program's key when that is what set it at that level, else the common
+  one, and the reply says which ("cot is off (global config, for all
+  programs)"). A split made by hand stays without asking each time.
+
+## tapto-word's projects
+
+Decided 29 Oct.
+
+- tapto-word starts with one project, **`tapto-word-1`**, under
+  `~/.tapto/projects/tapto-word-1/` like tapto-code's (its config, plugin
+  folders, the memory). So all three have the same scopes: the session
+  (tapto-word: the document's conversation), the project, global.
+- Later projects are numbered on: `tapto-word-2`, ... Creating, switching
+  and listing them is a task-pane element.
+- **A document is not tied to a project.** The project is the one the user
+  switched to last; opening the same document again under another project
+  (switched to start a new task) is a normal case, not one to correct.
+
+## Plugins in all three: open
+
+- **Where the plugin sources live:** decided 29 Oct. A plugin any of the
+  three can use lives in libtapto's `plugins/` folder: image, jira (a
+  report in Word from tickets), mcp, memory, skills. One that only makes
+  sense for one program lives in that program's repo (a static code
+  analysis plugin would be tapto-code's). So:
+  - libtapto's CMake builds its plugins as modules (an option, on by
+    default for a program, off for libtapto's own CI if it wants), with the
+    `tapto_code_plugin()` helper moved there as `tapto_plugin()`, and the
+    `TAPTO_PLUGINS` list a packaging project signs and scans. A program's
+    own plugins use the same helper, so its installer finds both in one
+    list.
+  - The plugins come at the libtapto tag a program pins, built by that
+    program's compiler (MinGW for tapto-word: the boundary is a C ABI, so
+    nothing changes for the plugin) into its own `plugins` folder, and
+    signed by its own installer.
+  - Their dependencies come along: httplib and OpenSSL are libtapto's pins
+    already; stb (image) moves from tapto-code's CMake to libtapto's.
+  - The loader and its test plugins move too (see "The plugins" above), and
+    `test-plugins` with them, run by libtapto's tests; tapto-code keeps the
+    tests of what is its own (the commands it dispatches, main's rebuild).
+- **Compilers:** the shipped, signed builds of all three are MSVC (Jenkins),
+  so the plugins a user gets and the program loading them share a
+  compiler. tapto-word also builds with MinGW outside Jenkins: for that
+  build to keep working, the loader and the plugins must compile under GCC
+  (WinVerifyTrust, wincred, mcp's Job object through MinGW's headers), or
+  the MinGW build turns the plugins off. To decide when tapto-word takes
+  them; nothing shipped depends on it.
+- **Signatures:** the loader takes a plugin signed by the certificate that
+  signed the program itself; all three are signed with the same eToken, so
+  one plugin build serves all three. Unchanged, but untested (the signed
+  path has never run).
+- **Per-program fit:** the memory plugin's folder is per project, which in
+  tapto-word is the current one (`tapto-word-1` at first); `/mcp login`
+  opens a browser from a tray server, which is fine; image_read needs a
+  model that sees in each.
+- **`@tmp` per session:** overflow writes to the session's `@tmp`;
+  tapto-word's session is a document, so its `@tmp` is per document.
+
+## Order
+
+- [ ] libtapto v0.7.0: the settings, conversation and folder commands, the
+      editor and the plugin loader, with tests.
+- [ ] tapto-code takes them: mostly code going away, with the scope flags.
+- [ ] tapto-word: v0.1.0 to v0.7.0 first, then the shared commands, rw
+      folders and plugins, and its own /cot and /effort go.
+- [ ] tapto-vnc: the same catch-up, then the commands and plugins.
+
+---
+
 # 1.2.0: project memory, POSIX prompt editing (PR #1)
 
 Merged 20 Oct (`6163cd3`, from MatteO-Matic): a per-project memory file at

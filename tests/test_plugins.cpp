@@ -1009,8 +1009,11 @@ int main(int argc, char** argv) {
                                                       " (mcp-servers) is missing"));
         }
 
+#ifndef NDEBUG
         // A server behind OAuth: no tools until the user logs in, then a
-        // token kept between sessions and renewed when it is refused.
+        // token kept between sessions and renewed when it is refused. Debug
+        // builds only: the login is the plugin's test login there
+        // (TAPTO_MCP_TEST_LOGIN), and a Release plugin opens a real browser.
         {
             const std::string kept = "oauth.tapto-test-oauth";
             tapto::store_plugin_secret("mcp", kept, "");
@@ -1114,64 +1117,70 @@ int main(int argc, char** argv) {
                 CHECK_EQ(of.revoked, "rt-4 refresh_token");
                 CHECK_TRUE(!tapto::load_plugin_secret("mcp", kept));
                 CHECK_EQ(names(plugins.tools()), "");
-
-                // A server added to the file comes in with /mcp reload.
-                std::ofstream(other_file)
-                    << json{{"mcpServers",
-                             {{"tapto-test-oauth", {{"url", base + "/secure"}}},
-                              {"local", {{"command", mcp_server.u8string()}, {"tools", {"echo"}}}}}}}
-                           .dump();
-                const std::string reloaded = plugins.run_command("mcp", "reload", ctx).value_or("");
-                CHECK_TRUE(starts_with(reloaded, "Read " + other_file.u8string() + " again."));
-                CHECK_TRUE(contains(reloaded, "local (stdio): 1 tools"));
-                CHECK_EQ(names(plugins.tools()), "mcp_local_echo");
-
-                // Edited between turns: taken in before the next, only the
-                // servers whose entry changed started or stopped.
-                bool changed = false;
-                CHECK_EQ(plugins.before_turn(ctx, changed), "");
-                CHECK_TRUE(!changed);
-                auto write_servers = [&](const json& servers) {
-                    std::ofstream(other_file) << json{{"mcpServers", servers}}.dump();
-                };
-                const json oauth_entry = {{"url", base + "/secure"}};
-                const json local_entry = {{"command", mcp_server.u8string()}, {"tools", {"echo"}}};
-                write_servers({{"tapto-test-oauth", oauth_entry},
-                               {"local", local_entry},
-                               {"local2", local_entry}});
-                std::string note = plugins.before_turn(ctx, changed);
-                CHECK_TRUE(changed);
-                CHECK_TRUE(starts_with(note, "MCP: started local2.") || starts_with(note, "MCP: started local2\n"));
-                CHECK_TRUE(contains(note, "local2: 1 tools"));
-                CHECK_TRUE(!contains(note, "restarted"));
-                CHECK_EQ(names(plugins.tools()), "mcp_local2_echo mcp_local_echo");
-                CHECK_EQ(plugins.before_turn(ctx, changed = false), "");
-                CHECK_TRUE(!changed);
-
-                json local_more = local_entry;
-                local_more["tools"] = {"echo", "fail"};
-                write_servers({{"tapto-test-oauth", oauth_entry}, {"local", local_more}});
-                note = plugins.before_turn(ctx, changed);
-                CHECK_TRUE(changed);
-                CHECK_TRUE(starts_with(note, "MCP: restarted local; stopped local2"));
-                CHECK_EQ(names(plugins.tools()), "mcp_local_echo mcp_local_fail");
-
-                // Half saved: the servers keep running, said once.
-                std::ofstream(other_file) << R"({"mcpServers": {"local": )";
-                note = plugins.before_turn(ctx, changed = false);
-                CHECK_TRUE(contains(note, "is not valid JSON; the servers keep running as they were"));
-                CHECK_EQ(names(plugins.tools()), "mcp_local_echo mcp_local_fail");
-                CHECK_EQ(plugins.before_turn(ctx, changed = false), "");
-                // Saved whole again, as it was: nothing to do.
-                write_servers({{"tapto-test-oauth", oauth_entry}, {"local", local_more}});
-                CHECK_EQ(plugins.before_turn(ctx, changed = false), "");
-                CHECK_TRUE(!changed);
-                Context call_ctx;
-                CHECK_EQ(call(plugins.tools(), call_ctx, "mcp_local_fail", json::object()),
-                         "ERROR: it broke");
             }
             set_env("TAPTO_MCP_TEST_LOGIN", "");
             tapto::store_plugin_secret("mcp", kept, "");
+        }
+#endif
+
+        // The servers file: /mcp reload, and edits taken in between turns.
+        {
+            std::ofstream(other_file) << R"({"mcpServers": {}})";
+            tapto::Plugins plugins;
+            CHECK_EQ(plugins.add_file(mcp_module, false), "");
+            CHECK_EQ(names(plugins.tools()), "");
+            Context ctx;
+            // A server added to the file comes in with /mcp reload.
+            std::ofstream(other_file)
+                << json{{"mcpServers",
+                         {{"local", {{"command", mcp_server.u8string()}, {"tools", {"echo"}}}}}}}
+                       .dump();
+            const std::string reloaded = plugins.run_command("mcp", "reload", ctx).value_or("");
+            CHECK_TRUE(starts_with(reloaded, "Read " + other_file.u8string() + " again."));
+            CHECK_TRUE(contains(reloaded, "local (stdio): 1 tools"));
+            CHECK_EQ(names(plugins.tools()), "mcp_local_echo");
+
+            // Edited between turns: taken in before the next, only the
+            // servers whose entry changed started or stopped.
+            bool changed = false;
+            CHECK_EQ(plugins.before_turn(ctx, changed), "");
+            CHECK_TRUE(!changed);
+            auto write_servers = [&](const json& servers) {
+                std::ofstream(other_file) << json{{"mcpServers", servers}}.dump();
+            };
+            const json local_entry = {{"command", mcp_server.u8string()}, {"tools", {"echo"}}};
+            write_servers({{"local", local_entry},
+                           {"local2", local_entry}});
+            std::string note = plugins.before_turn(ctx, changed);
+            CHECK_TRUE(changed);
+            CHECK_TRUE(starts_with(note, "MCP: started local2.") || starts_with(note, "MCP: started local2\n"));
+            CHECK_TRUE(contains(note, "local2: 1 tools"));
+            CHECK_TRUE(!contains(note, "restarted"));
+            CHECK_EQ(names(plugins.tools()), "mcp_local2_echo mcp_local_echo");
+            CHECK_EQ(plugins.before_turn(ctx, changed = false), "");
+            CHECK_TRUE(!changed);
+
+            json local_more = local_entry;
+            local_more["tools"] = {"echo", "fail"};
+            write_servers({{"local", local_more}});
+            note = plugins.before_turn(ctx, changed);
+            CHECK_TRUE(changed);
+            CHECK_TRUE(starts_with(note, "MCP: restarted local; stopped local2"));
+            CHECK_EQ(names(plugins.tools()), "mcp_local_echo mcp_local_fail");
+
+            // Half saved: the servers keep running, said once.
+            std::ofstream(other_file) << R"({"mcpServers": {"local": )";
+            note = plugins.before_turn(ctx, changed = false);
+            CHECK_TRUE(contains(note, "is not valid JSON; the servers keep running as they were"));
+            CHECK_EQ(names(plugins.tools()), "mcp_local_echo mcp_local_fail");
+            CHECK_EQ(plugins.before_turn(ctx, changed = false), "");
+            // Saved whole again, as it was: nothing to do.
+            write_servers({{"local", local_more}});
+            CHECK_EQ(plugins.before_turn(ctx, changed = false), "");
+            CHECK_TRUE(!changed);
+            Context call_ctx;
+            CHECK_EQ(call(plugins.tools(), call_ctx, "mcp_local_fail", json::object()),
+                     "ERROR: it broke");
         }
 
         // A secret longer than one credential holds comes back whole.

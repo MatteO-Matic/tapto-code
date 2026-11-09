@@ -218,6 +218,22 @@ int main() {
 
         CHECK_EQ(render(tapto::transcript(json::object())), "");
         CHECK_EQ(render(tapto::transcript(json::parse(R"([1,"x",{"role":"user"}])"))), "");
+
+        // --- what Up recalls after a resume ----------------------------------
+        // This run's typing, then the conversation's prompts, then the
+        // unanswered one; a repeat keeps its newest place; the newest `cap`.
+        auto join = [](const std::vector<std::string>& v) {
+            std::string out;
+            for (const auto& s : v) out += s + "|";
+            return out;
+        };
+        CHECK_EQ(join(tapto::recall_history({}, claude, "and the tests", 100)),
+                 "fix the build|thanks|and the tests|");
+        CHECK_EQ(join(tapto::recall_history({"thanks", "/resume"}, claude, "", 100)),
+                 "/resume|fix the build|thanks|");
+        CHECK_EQ(join(tapto::recall_history({"a", ""}, gemini, "a", 100)), "list files|a|");
+        CHECK_EQ(join(tapto::recall_history({"a", "b"}, claude, "c", 2)), "thanks|c|");
+        CHECK_EQ(join(tapto::recall_history({}, json::array(), "", 100)), "");
     }
 
     fs::remove_all(kDir, ec);

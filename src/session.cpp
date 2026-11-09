@@ -5,10 +5,12 @@
 
 #include "tapto/paths.h"
 
+#include <algorithm>
 #include <ctime>
 #include <fstream>
 #include <sstream>
 #include <system_error>
+#include <unordered_set>
 
 namespace fs = std::filesystem;
 using nlohmann::json;
@@ -217,6 +219,26 @@ std::vector<TranscriptEntry> transcript(const json& history) {
             }
         }
     }
+    return out;
+}
+
+std::vector<std::string> recall_history(const std::vector<std::string>& typed,
+                                        const json& history, const std::string& pending,
+                                        std::size_t cap) {
+    std::vector<std::string> all = typed;
+    for (auto& e : transcript(history)) {
+        if (e.who == TranscriptEntry::Who::User) all.push_back(std::move(e.text));
+    }
+    if (!pending.empty()) all.push_back(pending);
+
+    // Newest first, so the first sight of an entry is the place it keeps.
+    std::vector<std::string> out;
+    std::unordered_set<std::string> seen;
+    for (auto it = all.rbegin(); it != all.rend() && out.size() < cap; ++it) {
+        if (it->empty() || !seen.insert(*it).second) continue;
+        out.push_back(std::move(*it));
+    }
+    std::reverse(out.begin(), out.end());
     return out;
 }
 

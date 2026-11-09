@@ -73,4 +73,15 @@ struct TranscriptEntry {
 // between two prompts are joined into one entry.
 std::vector<TranscriptEntry> transcript(const nlohmann::json& history);
 
+// The prompts the line editor recalls with Up once a conversation is resumed,
+// oldest first: `typed` (what was entered earlier in this run), then the
+// prompts of `history` as transcript() finds them, then `pending` (the prompt
+// the resumed session never got an answer to), newest, so one Up brings it
+// back. An entry that repeats keeps only its newest place, so switching
+// conversations back and forth does not pile up copies, and only the newest
+// `cap` entries are kept.
+std::vector<std::string> recall_history(const std::vector<std::string>& typed,
+                                        const nlohmann::json& history,
+                                        const std::string& pending, std::size_t cap);
+
 } // namespace tapto

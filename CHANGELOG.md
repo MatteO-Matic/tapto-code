@@ -119,8 +119,20 @@ newer build never looks older than the one it replaces.
   rw` in a session (`ro` lets the model read its notes but not change them).
   The notes move to `~/.tapto/projects/<project>/plugins/memory/` the first
   time, and administrators can leave the memory out with `allowed-plugins`.
+- On Windows the prompt line has the same editing as on Linux and macOS:
+  Left and Right, Home and End, Delete, and Up and Down through the prompts
+  of this session. A multi-line paste is still sent as one prompt.
+- After `--resume` or `/resume`, Up recalls the prompts of the conversation
+  you picked up, starting with the one that never got an answer.
 
 ### Fixed
+
+- Pressing Up while writing a prompt showed an earlier prompt in its place,
+  and the text you had written was gone. Down now brings it back, and a
+  recalled prompt you change keeps your changes while you move through the
+  others.
+- Ctrl-D at an empty prompt ends the session, as it does in a shell; it used
+  to do nothing.
 
 - A table the model returned that was wider than your terminal had its rows
   cut off with a `…` where they did not fit, so part of each cell was missing.

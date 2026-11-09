@@ -108,6 +108,9 @@ newer build never looks older than the one it replaces.
 - A setting can be for one program alone: `tapto-code.print-cot = false`
   applies to tapto-code and not to tapto-word or tapto-vnc, which share the
   config. `config set` takes such keys.
+- A prompt can run over several lines as you type it: end a line in a
+  backslash and press Enter to go on to the next line, and press Enter on a
+  line without one to send it.
 
 ### Changed
 

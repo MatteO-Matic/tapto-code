@@ -861,7 +861,10 @@ struct RawTerminal {
 // Multi-line pastes are captured through the bracketed-paste markers (ESC [
 // 200~ ... ESC [ 201~) that most terminals send, and land in the line as
 // newlines; a Windows console that sends no markers has its pastes told
-// apart from typing by the lines arriving together (see edit_line).
+// apart from typing by the lines arriving together (see edit_line). A line
+// break is typed by ending the line in a backslash and pressing Enter, as in
+// a shell: most terminals send Shift-Enter as the same byte as Enter, so only
+// a typed marker tells the two apart everywhere.
 //
 // The platform part is EditTerminal: the terminal put in a mode without echo
 // or line editing for the one line, its input as UTF-8 bytes, and its width.
@@ -1204,7 +1207,8 @@ enum class EditResult {
 // Read one line from a terminal, with the program doing its own line
 // editing (echo off). The arrow keys' ESC sequences are consumed as cursor
 // moves and history recall instead of being recorded as "[A" and friends.
-// Bracketed pastes land in the line with their newlines.
+// Bracketed pastes land in the line with their newlines, and Enter on a line
+// ending in a backslash starts the next row instead of sending.
 EditResult edit_line(const std::string& prompt_text, std::string& out) {
     EditTerminal term;
     if (!term.active()) return EditResult::NoTerminal;
@@ -1459,6 +1463,19 @@ EditResult edit_line(const std::string& prompt_text, std::string& out) {
                 continue;
             }
 #endif
+            // A line that ends in a backslash goes on to the next row, as in a
+            // shell: the backslash becomes the line break, and the cursor
+            // goes to the end of the line. An even number of them are
+            // backslashes meant as such, and the line is sent.
+            size_t backslashes = 0;
+            while (backslashes < line.size() && line[line.size() - 1 - backslashes] == '\\')
+                ++backslashes;
+            if (backslashes % 2 == 1) {
+                line.back() = '\n';
+                pos = line.size();
+                reprint();
+                continue;
+            }
             return submit();
         }
         if (b == 0x7f || b == '\b') { // backspace / delete
